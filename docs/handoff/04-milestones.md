@@ -71,6 +71,17 @@ Desktop Streamer uses it).
 
 ## M5 — Yield to games (the dev's "toggle + safe restore")
 
+### Open items to revisit (from M4 part 1, 2026-10-07)
+- [ ] Frametop's keyboard doesn't open by itself for the stream window (no Wayland
+      text-input; Windows fields can't signal focus). Today: a mapped controller button
+      (Frametop Input Settings, keyboard toggle) or `vrkeyboard show` on @ft_screens. Better:
+      a host-side focus signal (Vibepollo/Sunshine) -> auto-open.
+- [ ] Wrist pinning of the stream window untested (second controller was away).
+- [ ] Upstream the grab-bar hit-box fix (commit "screens: set controls' mouse scale...") to
+      Frametop as its own PR.
+- [ ] Lowest-row pointer diagnostics stay behind FTRD_POINTER_DEBUG=1; drop when no longer
+      useful.
+
 - [ ] Detect VR game focus (Frametop already knows — see `power/`, session
       docs); suspend stream + release decoder cleanly on game start.
 - [ ] **Lasers off during VR games, like Frametop's screens** (Curtis, 2026-10-07): the

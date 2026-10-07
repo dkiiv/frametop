@@ -47,6 +47,7 @@ struct Opts {
     const char *pair = nullptr, *dump = nullptr;
     int w = 5120, h = 1440, fps = 90, bitrate = 50000, dumpFrame = 300;
     bool hevc = true, vr = true, inputTest = false, wl = false;
+    int appId = -1;
     int winW = 0, winH = 0;
     double panelW = 2.4, dist = 1.5, seconds = 0;
 } g_o;
@@ -486,6 +487,7 @@ int main(int argc, char **argv) {
         if (a == "--pair") g_o.pair = next();
         else if (a == "--host") g_o.host = next();
         else if (a == "--app") g_o.app = next();
+        else if (a == "--app-id") g_o.appId = atoi(next());  // e.g. a Vibepollo control the list hides
         else if (a == "--size") sscanf(next(), "%dx%d", &g_o.w, &g_o.h);
         else if (a == "--fps") g_o.fps = atoi(next());
         else if (a == "--bitrate") g_o.bitrate = atoi(next());
@@ -525,10 +527,38 @@ int main(int argc, char **argv) {
 
     PAPP_LIST apps = nullptr;
     int appId = -1;
-    if (gs_applist(&server, &apps) == GS_OK)
-        for (PAPP_LIST a = apps; a; a = a->next)
-            if (g_o.app == a->name) appId = a->id;
-    if (appId < 0) return fprintf(stderr, "app \"%s\" not found on the server\n", g_o.app.c_str()), 1;
+    auto find = [&](const char *name) {
+        apps = nullptr;
+        int id = -1;
+        if (gs_applist(&server, &apps) == GS_OK)
+            for (PAPP_LIST a = apps; a; a = a->next)
+                if (!strcmp(name, a->name)) id = a->id;
+        return id;
+    };
+    appId = g_o.appId >= 0 ? g_o.appId : find(g_o.app.c_str());
+    // Vibepollo keeps a client's Remote Monitor (its virtual display) after the stream ends, and
+    // then lists only "Resume" and "Disconnect Monitor" to that client; Resume can't change the
+    // display's size. So release it and ask again, for the size we want (~3 s).
+    if (appId < 0 && g_o.app == "Remote Monitor") {
+        const int disc = find("Disconnect Monitor");
+        if (disc >= 0) {
+            STREAM_CONFIGURATION c;
+            LiInitializeStreamConfiguration(&c);
+            c.width = g_o.w, c.height = g_o.h, c.fps = g_o.fps, c.bitrate = g_o.bitrate;
+            gs_start_app(&server, &c, disc, false, true, 0);  // replies with an "error" that says it worked
+            printf("host: released this client's previous Remote Monitor (%s)\n", gs_error ? gs_error : "");
+            server.currentGame = 0;  // libgamestream "resumes" when this is set; launch afresh
+            for (int i = 0; i < 20 && appId < 0; ++i) {
+                appId = g_o.appId >= 0 ? g_o.appId : find(g_o.app.c_str());
+                if (appId < 0) usleep(250000);
+            }
+        }
+    }
+    if (appId < 0) {
+        fprintf(stderr, "app \"%s\" not found on the server; it lists:\n", g_o.app.c_str());
+        for (PAPP_LIST a = apps; a; a = a->next) fprintf(stderr, "  %d  %s\n", a->id, a->name);
+        return 1;
+    }
 
     STREAM_CONFIGURATION cfg;
     LiInitializeStreamConfiguration(&cfg);
