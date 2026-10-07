@@ -11,7 +11,11 @@ or copied anywhere else.
 |---|---|---|
 | `DESKTOP-5GH4MUU` (WSL2, Ubuntu) | Your home. Repo checkout, editing, builds are orchestrated from here. | you live here |
 | `frame` (10.0.0.253) | Valve Steam Frame, SteamOS (VR variant), aarch64, dev mode on, sshd on. | `ssh frame` (alias in `~/.ssh/config`, key `~/.ssh/id_ed25519`) |
-| Windows PC | The stream **source** (Sunshine goes here). Same LAN. Not set up yet. | TBD — Curtis sets up SSH or runs commands himself |
+| Windows PC | The stream **source**. It is the WSL host itself (DESKTOP-5GH4MUU, RTX 5080). Sunshine installed in M1. | `powershell.exe` / `winget` from WSL (PS 5.1); UAC prompts need Curtis |
+
+Network note (M1): the PC also has the Valve Steam Frame USB adapter on a direct 6 GHz link to
+the Frame's own AP: Frame `10.35.78.1`, PC `10.35.78.22` (~half the latency of the home LAN).
+Stream over that link; `ssh frame` (10.0.0.253) goes over home Wi-Fi.
 
 Note: `ssh frame '<cmd>'` is non-interactive; `~/.local/bin` is NOT on PATH, so
 `distrobox`/`podman` need `PATH=$HOME/.local/bin:$PATH` in the command string.

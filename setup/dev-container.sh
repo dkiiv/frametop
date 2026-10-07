@@ -30,6 +30,8 @@ packages=(
   python3-pyside6 kf6-kirigami kf6-qqc2-desktop-style qt6-qtwayland breeze-icon-theme plasma-breeze
   # Frametop remote desktop (VNC bridge through krdp)
   krdp freerdp tigervnc-x11-server xrandr
+  # remote-display POC (remote-display/stream): libgamestream pairing/launch needs these
+  openssl-devel libcurl-devel expat-devel libuuid-devel
   # diagnostics and remote UI testing
   wayland-utils xorg-x11-server-Xvfb ImageMagick xdotool
 )
