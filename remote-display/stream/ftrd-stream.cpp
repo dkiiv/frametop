@@ -621,7 +621,7 @@ int main(int argc, char **argv) {
     while (!g_stop && !g_terminated) {
         if (g_o.wl) {
             WlPoll(50, committed);
-            if (g_wl.closed) { printf("window: closed\n"); break; }
+            if (g_wl.closed) { printf("window: closed (or the desktop went away)\n"); break; }
         } else {
             usleep(4000);
         }
@@ -640,6 +640,7 @@ int main(int argc, char **argv) {
         if (now - lastPrint >= 5000000000LL) {
             std::lock_guard<std::mutex> l(g_mu);
             PrintWindow("stats", g_win, (now - lastPrint) / 1e9);
+            if (g_o.wl && g_wl.moves && getenv("FTRD_POINTER_DEBUG")) WlPrintLows();
             g_win.Clear();
             lastPrint = now;
         }
@@ -665,9 +666,9 @@ int main(int argc, char **argv) {
                g_o.hevc ? "HEVC" : "H.264", g_o.bitrate, wall, (unsigned long long)g_shown.load());
         PrintWindow("  all", g_all, wall);
         if (g_o.wl)
-            printf("  window: %llu commits; input %llu moves, %llu clicks, %llu scrolls, %llu keys\n",
+            printf("  window: %llu commits; input %llu moves, %llu clicks, %llu scrolls, %llu keys; pointer lowest row %d of %d\n",
                    (unsigned long long)g_wl.commits, (unsigned long long)g_wl.moves, (unsigned long long)g_wl.clicks,
-                   (unsigned long long)g_wl.scrolls, (unsigned long long)g_wl.keys);
+                   (unsigned long long)g_wl.scrolls, (unsigned long long)g_wl.keys, g_wl.lowY, g_wl.streamH);
         printf("  SoC busy %.1f%% of 8 cores\n",
                cpu1.total > cpu0.total ? 100.0 * double(cpu1.busy - cpu0.busy) / double(cpu1.total - cpu0.total) : NAN);
     }

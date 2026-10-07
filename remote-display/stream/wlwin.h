@@ -59,6 +59,9 @@ struct Wl {
     int keysMods = 0;
     std::vector<int> keysDown;       // VK codes held on the PC
     uint64_t moves = 0, clicks = 0, scrolls = 0, keys = 0, commits = 0;
+    int lowY = 0;                    // lowest stream row the pointer reached (diagnostics)
+    int lowBin[10] = {};             // ...per tenth of the width, left to right
+    double rawLow = 0;               // lowest surface y KWin sent
 } g_wl;
 
 // Decoder thread: a decoded frame is ready in capture buffer `capIdx`.
@@ -112,6 +115,13 @@ int ModBit(int vk) {
         default: return 0;
     }
 }
+// Diagnostics (FTRD_POINTER_DEBUG=1, every stats line): the lowest row reached in each tenth
+// of the width. Found the grab-bar hit-box bug (screens/vr.cpp MakeChrome).
+void WlPrintLows() {
+    printf("pointer lowest row by tenth of width (of %d):", g_wl.streamH);
+    for (int v : g_wl.lowBin) printf(" %d", v);
+    printf(" | surface y max %.1f of %d\n", g_wl.rawLow, g_wl.winH ? g_wl.winH : g_wl.defH);
+}
 void WlReleaseKeys() {
     for (int vk : g_wl.keysDown) LiSendKeyboardEvent(short(0x8000 | vk), KEY_ACTION_UP, 0);
     g_wl.keysDown.clear();
@@ -121,8 +131,10 @@ void WlReleaseKeys() {
 // ---- listeners ---------------------------------------------------------------------------
 void PtrEnter(void *, wl_pointer *, uint32_t, wl_surface *, wl_fixed_t x, wl_fixed_t y) {
     g_wl.px = wl_fixed_to_double(x), g_wl.py = wl_fixed_to_double(y);
+    printf("pointer: entered at %.0f,%.0f\n", g_wl.px, g_wl.py);
 }
-void PtrLeave(void *, wl_pointer *, uint32_t, wl_surface *) {
+void PtrLeave(void *, wl_pointer *, uint32_t, wl_surface *s) {
+    if (s) printf("pointer: left from %.0f,%.0f (lowest %d of %d)\n", g_wl.px, g_wl.py, g_wl.lowY, g_wl.streamH);
     for (int b : {BUTTON_LEFT, BUTTON_RIGHT, BUTTON_MIDDLE, BUTTON_X1, BUTTON_X2})
         LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, b);
 }
@@ -134,6 +146,10 @@ void PtrMotion(void *, wl_pointer *, uint32_t, wl_fixed_t x, wl_fixed_t y) {
     const int sy = std::clamp(int(g_wl.py * g_wl.streamH / h), 0, g_wl.streamH - 1);
     LiSendMousePositionEvent(short(sx), short(sy), short(g_wl.streamW), short(g_wl.streamH));
     ++g_wl.moves;
+    if (sy > g_wl.lowY) g_wl.lowY = sy;
+    int &bin = g_wl.lowBin[std::clamp(sx * 10 / g_wl.streamW, 0, 9)];
+    if (sy > bin) bin = sy;
+    if (g_wl.py > g_wl.rawLow) g_wl.rawLow = g_wl.py;
 }
 void PtrButton(void *, wl_pointer *, uint32_t, uint32_t, uint32_t button, uint32_t state) {
     int b = 0;
@@ -319,12 +335,19 @@ void WlFrames(std::function<void(int frame)> shown) {
 
 // Main thread: wait up to timeoutMs for Wayland events or frames, and handle them.
 void WlPoll(int timeoutMs, std::function<void(int frame)> shown) {
-    while (wl_display_prepare_read(g_wl.dpy) != 0) wl_display_dispatch_pending(g_wl.dpy);
-    wl_display_flush(g_wl.dpy);
+    if (wl_display_get_error(g_wl.dpy)) { g_wl.closed = true; return; }  // the desktop went away
+    while (wl_display_prepare_read(g_wl.dpy) != 0)
+        if (wl_display_dispatch_pending(g_wl.dpy) < 0) { g_wl.closed = true; return; }
+    if (wl_display_flush(g_wl.dpy) < 0 && errno != EAGAIN) { wl_display_cancel_read(g_wl.dpy); g_wl.closed = true; return; }
     pollfd p[2] = {{wl_display_get_fd(g_wl.dpy), POLLIN, 0}, {g_wl.efd, POLLIN, 0}};
-    if (poll(p, 2, timeoutMs) > 0 && (p[0].revents & POLLIN)) wl_display_read_events(g_wl.dpy);
-    else wl_display_cancel_read(g_wl.dpy);
-    wl_display_dispatch_pending(g_wl.dpy);
+    const int r = poll(p, 2, timeoutMs);
+    if (r > 0 && (p[0].revents & (POLLERR | POLLHUP))) { wl_display_cancel_read(g_wl.dpy); g_wl.closed = true; return; }
+    if (r > 0 && (p[0].revents & POLLIN)) {
+        if (wl_display_read_events(g_wl.dpy) < 0) { g_wl.closed = true; return; }
+    } else {
+        wl_display_cancel_read(g_wl.dpy);
+    }
+    if (wl_display_dispatch_pending(g_wl.dpy) < 0) { g_wl.closed = true; return; }
     if (p[1].revents & POLLIN) WlFrames(shown);
 }
 
