@@ -1,17 +1,22 @@
 // ftrd-stream: remote-display POC M2 (docs/handoff/04-milestones.md). A throwaway standalone
 // client: Sunshine (Moonlight protocol) -> qcom-iris V4L2 decode -> GPU NV12->ABGR8888 ->
-// SteamVR overlay panel. Not wired into ft-screens (that's M4); no input back-channel (M3).
+// SteamVR overlay panel. Not wired into ft-screens (that's M4).
+// Input (M3): SteamVR's laser mouse on the panel (a controller's laser or Frametop's 3D mouse)
+// -> absolute mouse position, buttons and scroll on the PC; a keyboard button under the panel
+// opens SteamVR's keyboard, whose characters go over as text (and Backspace/Enter/Tab/Esc/arrows
+// as keys).
 //
 //   ftrd-stream --pair PIN                 pair with Sunshine (enter PIN in Sunshine's web UI)
 //   ftrd-stream [options]                  stream the "Desktop" app onto a panel
 //     --host IP         Sunshine host (default 10.35.78.22: the PC end of the Valve USB adapter)
-//     --size WxH        stream size (default 5120x1440, the PC's ultrawide)   --fps N (60)
+//     --size WxH        stream size (default 5120x1440, the PC's ultrawide)   --fps N (90)
 //     --bitrate KBPS    (default 50000)   --codec hevc|h264 (hevc)
 //     --panel-width M   panel width in metres (2.4)   --distance M (1.5)
 //     --seconds S       stop after S seconds (default: until SIGINT/SIGTERM)
 //     --novr            no SteamVR: decode + convert only (headless checks)
 //     --dump F --dump-frame N   write decoded frame N as RGBA (after GPU conversion)
 //     --keys DIR        client cert/key dir (default ~/.config/frametop-remote-display)
+//     --input-test      3 s in, move the PC's cursor to (1234, 567) (checks the input path headless)
 //
 // Prints a stats line every 5 s and a summary at the end: frame rate, lost frames, Sunshine's
 // host processing latency, RTT, and the Frame-side latency from the first packet of a frame
@@ -36,8 +41,8 @@ namespace {
 struct Opts {
     std::string host = "10.35.78.22", app = "Desktop", keys;
     const char *pair = nullptr, *dump = nullptr;
-    int w = 5120, h = 1440, fps = 60, bitrate = 50000, dumpFrame = 300;
-    bool hevc = true, vr = true;
+    int w = 5120, h = 1440, fps = 90, bitrate = 50000, dumpFrame = 300;
+    bool hevc = true, vr = true, inputTest = false;
     double panelW = 2.4, dist = 1.5, seconds = 0;
 } g_o;
 
@@ -261,6 +266,175 @@ void ClStatus(int status) {
     printf("moonlight: connection status %s\n", status == CONN_STATUS_POOR ? "POOR" : "okay");
 }
 
+// ---- input (M3) ------------------------------------------------------------------------
+#ifdef FTRD_VR
+vr::VROverlayHandle_t g_kbButton = vr::k_ulOverlayHandleInvalid;
+bool g_kbShown = false;
+int g_buttonsHeld = 0;  // bitmask of BUTTON_* held on the PC
+uint64_t g_inMoves = 0, g_inClicks = 0, g_inScrolls = 0, g_inChars = 0, g_inKeys = 0;
+
+int MlButton(uint32_t vrButton) {
+    switch (vrButton) {
+        case vr::VRMouseButton_Left: return BUTTON_LEFT;
+        case vr::VRMouseButton_Right: return BUTTON_RIGHT;
+        case vr::VRMouseButton_Middle: return BUTTON_MIDDLE;
+        default: return 0;
+    }
+}
+
+void ReleaseButtons() {
+    for (int b : {BUTTON_LEFT, BUTTON_RIGHT, BUTTON_MIDDLE})
+        if (g_buttonsHeld & (1 << b)) LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, b);
+    g_buttonsHeld = 0;
+}
+
+void TapKey(short vk) {
+    LiSendKeyboardEvent(short(0x8000 | vk), KEY_ACTION_DOWN, 0);
+    LiSendKeyboardEvent(short(0x8000 | vk), KEY_ACTION_UP, 0);
+    ++g_inKeys;
+}
+
+// One VREvent_KeyboardCharInput: up to 7 bytes of UTF-8 (or a control character).
+void KeyboardInput(const char *in) {
+    const std::string s(in, strnlen(in, 8));
+    if (s.empty()) return;
+    if (static_cast<unsigned char>(s[0]) < 0x20 || s[0] == 0x7f) {  // log control keys only, never typed text
+        printf("input: control key from SteamVR keyboard:");
+        for (unsigned char c : s) printf(" %02x", c);
+        printf("\n");
+    }
+    if (s == "\b" || s == "\x7f") return TapKey(0x08);              // VK_BACK
+    if (s == "\n" || s == "\r") return TapKey(0x0D);                // VK_RETURN
+    if (s == "\t") return TapKey(0x09);                             // VK_TAB
+    if (s == "\x1b") return TapKey(0x1B);                           // VK_ESCAPE
+    if (s == "\x1b[A") return TapKey(0x26);                         // arrows, if the keyboard sends them
+    if (s == "\x1b[B") return TapKey(0x28);
+    if (s == "\x1b[C") return TapKey(0x27);
+    if (s == "\x1b[D") return TapKey(0x25);
+    LiSendUtf8TextEvent(s.data(), unsigned(s.size()));
+    ++g_inChars;
+}
+
+void ToggleKeyboard() {
+    if (g_kbShown) {
+        vr::VROverlay()->HideKeyboard();
+        g_kbShown = false;
+        return;
+    }
+    auto show = [] {
+        return vr::VROverlay()->ShowKeyboardForOverlay(
+            g_ov, vr::k_EGamepadTextInputModeNormal, vr::k_EGamepadTextInputLineModeSingleLine,
+            vr::KeyboardFlag_Minimal | vr::KeyboardFlag_ShowArrowKeys, "Remote PC", 256, "", 0);
+    };
+    auto e = show();
+    if (e == vr::VROverlayError_KeyboardAlreadyInUse) {
+        // SteamVR's keyboard "follows overlay focus": it may already be up, opened for our button
+        // (or someone else). Close it and open it for the panel.
+        vr::VROverlay()->HideKeyboard();
+        usleep(100000);
+        e = show();
+    }
+    if (e != vr::VROverlayError_None) printf("input: ShowKeyboardForOverlay failed: %s\n",
+                                             vr::VROverlay()->GetOverlayErrorNameFromEnum(e));
+    else g_kbShown = true, printf("input: keyboard shown\n");
+}
+
+void PollInput() {
+    vr::VREvent_t ev;
+    while (vr::VROverlay()->PollNextOverlayEvent(g_ov, &ev, sizeof ev)) {
+        switch (ev.eventType) {
+            case vr::VREvent_MouseMove: {  // GL space: origin bottom left, scaled to the stream size
+                const int x = std::clamp(int(ev.data.mouse.x), 0, g_o.w - 1);
+                const int y = std::clamp(g_o.h - 1 - int(ev.data.mouse.y), 0, g_o.h - 1);
+                LiSendMousePositionEvent(short(x), short(y), short(g_o.w), short(g_o.h));
+                ++g_inMoves;
+                break;
+            }
+            case vr::VREvent_MouseButtonDown:
+            case vr::VREvent_MouseButtonUp: {
+                const int b = MlButton(ev.data.mouse.button);
+                if (!b) break;
+                const bool down = ev.eventType == vr::VREvent_MouseButtonDown;
+                LiSendMouseButtonEvent(down ? BUTTON_ACTION_PRESS : BUTTON_ACTION_RELEASE, b);
+                if (down) g_buttonsHeld |= 1 << b, ++g_inClicks;
+                else g_buttonsHeld &= ~(1 << b);
+                break;
+            }
+            case vr::VREvent_ScrollDiscrete: {  // notches; positive = up/right, as on the PC
+                const int dy = int(std::lround(ev.data.scroll.ydelta)), dx = int(std::lround(ev.data.scroll.xdelta));
+                if (dy) LiSendScrollEvent((signed char)std::clamp(dy, -127, 127));
+                if (dx) LiSendHScrollEvent((signed char)std::clamp(dx, -127, 127));
+                ++g_inScrolls;
+                break;
+            }
+            case vr::VREvent_FocusLeave:  // laser left the panel: don't leave a button held on the PC
+                ReleaseButtons();
+                break;
+            case vr::VREvent_KeyboardCharInput:
+                KeyboardInput(ev.data.keyboard.cNewInput);
+                break;
+            case vr::VREvent_KeyboardClosed:
+            case vr::VREvent_KeyboardDone:
+                g_kbShown = false;
+                break;
+            default:
+                break;
+        }
+    }
+    while (g_kbButton != vr::k_ulOverlayHandleInvalid &&
+           vr::VROverlay()->PollNextOverlayEvent(g_kbButton, &ev, sizeof ev)) {
+        if (ev.eventType == vr::VREvent_MouseButtonUp && ev.data.mouse.button == vr::VRMouseButton_Left)
+            ToggleKeyboard();
+        else if (ev.eventType == vr::VREvent_KeyboardCharInput)  // keyboard opened for the button
+            KeyboardInput(ev.data.keyboard.cNewInput);
+        else if (ev.eventType == vr::VREvent_KeyboardClosed || ev.eventType == vr::VREvent_KeyboardDone)
+            g_kbShown = false;
+    }
+}
+
+// A 128x128 keyboard icon: dark rounded tile, three rows of light keys and a space bar.
+void MakeKeyboardButton(const vr::HmdMatrix34_t &panel, double panelW, double panelH) {
+    if (vr::VROverlay()->CreateOverlay("frametop.ftrdstream.kb", "Remote keyboard", &g_kbButton) !=
+        vr::VROverlayError_None) {
+        g_kbButton = vr::k_ulOverlayHandleInvalid;
+        return;
+    }
+    constexpr int N = 128;
+    static uint8_t px[N * N * 4];
+    for (int y = 0; y < N; ++y)
+        for (int x = 0; x < N; ++x) {
+            uint8_t *p = px + (y * N + x) * 4;
+            const int cx = std::min(x, N - 1 - x), cy = std::min(y, N - 1 - y);
+            const bool inside = !(cx < 12 && cy < 12 && (12 - cx) * (12 - cx) + (12 - cy) * (12 - cy) > 144);
+            bool key = false;
+            for (int row = 0; row < 3; ++row) {
+                const int y0 = 30 + row * 20;
+                if (y >= y0 && y < y0 + 14)
+                    for (int k = 0; k < 7; ++k) {
+                        const int x0 = 16 + row * 4 + k * 14;
+                        if (x >= x0 && x < x0 + 10 && x0 + 10 <= 116) key = true;
+                    }
+            }
+            if (y >= 92 && y < 104 && x >= 36 && x < 92) key = true;
+            const uint8_t v = key ? 230 : 40;
+            p[0] = p[1] = p[2] = v;
+            p[3] = inside ? 235 : 0;
+        }
+    vr::VROverlay()->SetOverlayRaw(g_kbButton, px, N, N, 4);
+    vr::VROverlay()->SetOverlayWidthInMeters(g_kbButton, 0.14f);
+    vr::HmdVector2_t scale = {float(N), float(N)};
+    vr::VROverlay()->SetOverlayMouseScale(g_kbButton, &scale);
+    vr::VROverlay()->SetOverlayInputMethod(g_kbButton, vr::VROverlayInputMethod_Mouse);
+    vr::VROverlay()->SetOverlayFlag(g_kbButton, vr::VROverlayFlags_MakeOverlaysInteractiveIfVisible, true);
+    // Below the panel's bottom-right corner, in the panel's plane.
+    const double lx = panelW / 2 - 0.10, ly = -panelH / 2 - 0.11;
+    vr::HmdMatrix34_t B = panel;
+    for (int r = 0; r < 3; ++r) B.m[r][3] = float(panel.m[r][3] + panel.m[r][0] * lx + panel.m[r][1] * ly);
+    vr::VROverlay()->SetOverlayTransformAbsolute(g_kbButton, vr::TrackingUniverseStanding, &B);
+    vr::VROverlay()->ShowOverlay(g_kbButton);
+}
+#endif
+
 void PrintWindow(const char *label, const Window &w, double secs) {
     printf("%s %.0fs: %.1f fps | host %.1f ms (p99 %.1f) | queue %.1f | decode %.1f (p99 %.1f) | convert %.1f "
            "| client recv->shown %.1f ms (p99 %.1f)",
@@ -293,6 +467,7 @@ int main(int argc, char **argv) {
         else if (a == "--distance") g_o.dist = atof(next());
         else if (a == "--seconds") g_o.seconds = atof(next());
         else if (a == "--novr") g_o.vr = false;
+        else if (a == "--input-test") g_o.inputTest = true;  // 3 s in: move the PC's cursor to (1234, 567)
         else if (a == "--dump") g_o.dump = next();
         else if (a == "--dump-frame") g_o.dumpFrame = atoi(next());
         else if (a == "--keys") g_o.keys = next();
@@ -358,6 +533,13 @@ int main(int argc, char **argv) {
         P.m[2][3] = float(hm.m[2][3] - std::cos(yaw) * g_o.dist);
         vr::VROverlay()->SetOverlayTransformAbsolute(g_ov, vr::TrackingUniverseStanding, &P);
         vr::VROverlay()->SetOverlayFlag(g_ov, vr::VROverlayFlags_IgnoreTextureAlpha, true);
+        // Input: SteamVR's laser mouse, in stream pixels; controllers work with the dashboard closed.
+        vr::HmdVector2_t mscale = {float(g_o.w), float(g_o.h)};
+        vr::VROverlay()->SetOverlayMouseScale(g_ov, &mscale);
+        vr::VROverlay()->SetOverlayInputMethod(g_ov, vr::VROverlayInputMethod_Mouse);
+        vr::VROverlay()->SetOverlayFlag(g_ov, vr::VROverlayFlags_SendVRDiscreteScrollEvents, true);
+        vr::VROverlay()->SetOverlayFlag(g_ov, vr::VROverlayFlags_MakeOverlaysInteractiveIfVisible, true);
+        MakeKeyboardButton(P, g_o.panelW, g_o.panelW * g_o.h / g_o.w);
         vr::ETrackedPropertyError pe;
         g_comp.hz = vr::VRSystem()->GetFloatTrackedDeviceProperty(vr::k_unTrackedDeviceIndex_Hmd,
                                                                   vr::Prop_DisplayFrequency_Float, &pe);
@@ -393,12 +575,22 @@ int main(int argc, char **argv) {
     }
     int64_t lastPrint = MonoNs();
     const CpuStat cpu0 = ReadCpu();
+    int64_t lastSample = MonoNs();
+    bool inputTested = false;
     while (!g_stop && !g_terminated) {
-        usleep(250000);
-#ifdef FTRD_VR
-        if (g_o.vr) SampleComp(g_comp);
-#endif
+        usleep(4000);
         const int64_t now = MonoNs();
+#ifdef FTRD_VR
+        if (g_o.vr) {
+            PollInput();
+            if (now - lastSample >= 250000000) SampleComp(g_comp), lastSample = now;
+        }
+#endif
+        if (g_o.inputTest && !inputTested && (now - t0) / 1e9 >= 3) {
+            const int r2 = LiSendMousePositionEvent(1234, 567, short(g_o.w), short(g_o.h));
+            printf("input-test: sent absolute mouse (1234, 567) of %dx%d -> %d\n", g_o.w, g_o.h, r2);
+            inputTested = true;
+        }
         if (now - lastPrint >= 5000000000LL) {
             std::lock_guard<std::mutex> l(g_mu);
             PrintWindow("stats", g_win, (now - lastPrint) / 1e9);
@@ -409,6 +601,12 @@ int main(int argc, char **argv) {
     }
     const double wall = (MonoNs() - t0) / 1e9;
     const CpuStat cpu1 = ReadCpu();
+#ifdef FTRD_VR
+    if (g_o.vr) {
+        ReleaseButtons();
+        if (g_kbShown) vr::VROverlay()->HideKeyboard();
+    }
+#endif
     LiStopConnection();
     gs_quit_app(&server);
     {
@@ -422,6 +620,10 @@ int main(int argc, char **argv) {
 #ifdef FTRD_VR
     if (g_o.vr) {
         PrintComp(g_comp, wall);
+        printf("  input: %llu moves, %llu clicks, %llu scrolls, %llu chars, %llu keys\n",
+               (unsigned long long)g_inMoves, (unsigned long long)g_inClicks, (unsigned long long)g_inScrolls,
+               (unsigned long long)g_inChars, (unsigned long long)g_inKeys);
+        if (g_kbButton != vr::k_ulOverlayHandleInvalid) vr::VROverlay()->DestroyOverlay(g_kbButton);
         vr::VROverlay()->DestroyOverlay(g_ov);
 #ifdef FTRD_GL
         for (auto &ro : g_rgb.out)

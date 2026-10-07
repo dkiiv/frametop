@@ -54,6 +54,15 @@ Deliberately NOT wired into ft-screens yet — standalone app, throwaway.
 
 ## M4 — Behaves like a local screen
 
+**Requirement (Curtis, 2026-10-07):** multiple *virtual* displays, not only mirrors of
+physical monitors on the PC. Plan: switch the host from stock Sunshine to Vibepollo (Nonary's
+Apollo/Sunshine fork, which the Frametop dev also tested) at the start of M4 for its built-in
+per-client virtual displays at the client's requested resolution and "Remote Monitor" extra
+streams. Same Moonlight protocol, so ftrd-stream should carry over. The PC's standalone
+MikeTheTech "Virtual Display Driver" was removed on 2026-10-07 to avoid conflicts (package
+backed up on the PC); Virtual Desktop's own "Virtual Desktop Monitor" stays (Virtual
+Desktop Streamer uses it).
+
 - [ ] Remote stream as a proper ft-screens output (Wayland client submitting
       dmabufs, like KWin) so move/resize/curve/pin-wrist all come free.
 - [ ] Resolution/refresh renegotiation when the panel is resized.
