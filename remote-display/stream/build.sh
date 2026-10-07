@@ -33,8 +33,19 @@ for c in $mcc/src/*.c $mcc/enet/*.c $mcc/reedsolomon/rs.c $me/libgamestream/clie
   [ $o -nt $c ] || gcc -std=gnu11 -O2 -w -fPIC $defs $inc -c $c -o $o
   objs="$objs $o"
 done
-g++ -std=c++17 -O2 -Wall -Wextra -Wno-missing-field-initializers -Wno-unused-function -DFTRD_VR -DFTRD_GL -Ibuild/include $inc \
-  $(pkg-config --cflags libdrm egl glesv2 gbm) -include cstdarg -o build/ftrd-stream ftrd-stream.cpp $objs \
-  $(pkg-config --libs egl glesv2 gbm libcurl openssl expat uuid) -lpthread \
+# Wayland protocols for window mode (--window): generated client code
+mkdir -p build/proto
+wp=/usr/share/wayland-protocols
+for x in $wp/stable/xdg-shell/xdg-shell.xml $wp/stable/linux-dmabuf/linux-dmabuf-v1.xml \
+         $wp/stable/viewporter/viewporter.xml $wp/unstable/xdg-decoration/xdg-decoration-unstable-v1.xml; do
+  n=$(basename $x .xml)
+  [ build/proto/$n-client-protocol.h -nt $x ] || wayland-scanner client-header $x build/proto/$n-client-protocol.h
+  [ build/proto/$n-protocol.c -nt $x ] || wayland-scanner private-code $x build/proto/$n-protocol.c
+  [ build/obj/proto_$n.o -nt build/proto/$n-protocol.c ] || gcc -O2 -fPIC -c build/proto/$n-protocol.c -o build/obj/proto_$n.o
+  objs="$objs build/obj/proto_$n.o"
+done
+g++ -std=c++17 -O2 -Wall -Wextra -Wno-missing-field-initializers -Wno-unused-function -DFTRD_VR -DFTRD_GL -Ibuild/include -Ibuild/proto $inc \
+  $(pkg-config --cflags libdrm egl glesv2 gbm wayland-client) -include cstdarg -o build/ftrd-stream ftrd-stream.cpp $objs \
+  $(pkg-config --libs egl glesv2 gbm libcurl openssl expat uuid wayland-client) -lpthread \
   -L/opt/steamvr/bin/linuxarm64 -lopenvr_api -Wl,-rpath,/opt/steamvr/bin/linuxarm64
 echo "built remote-display/stream/build/ftrd-stream"'

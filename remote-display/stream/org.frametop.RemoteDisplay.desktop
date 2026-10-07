@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Remote PC (POC)
+Comment=Frametop remote-display POC: the Windows PC's desktop over Sunshine, as a floating window
+Exec=sh -c "$HOME/dev/frametop/remote-display/stream/stream.sh on --window"
+Icon=preferences-desktop-remote-desktop
+Terminal=false
+Categories=Network;RemoteAccess;
+StartupWMClass=org.frametop.RemoteDisplay

@@ -14,6 +14,9 @@
 //     --panel-width M   panel width in metres (2.4)   --distance M (1.5)
 //     --seconds S       stop after S seconds (default: until SIGINT/SIGTERM)
 //     --novr            no SteamVR: decode + convert only (headless checks)
+//     --window [WxH]    M4: a Wayland window on the Frame's desktop (KWin) instead of a SteamVR
+//                       overlay (default size: the stream's); NV12 straight to KWin, no GPU pass.
+//                       WAYLAND_DISPLAY must name the desktop's socket (stream.sh sets it).
 //     --dump F --dump-frame N   write decoded frame N as RGBA (after GPU conversion)
 //     --keys DIR        client cert/key dir (default ~/.config/frametop-remote-display)
 //     --input-test      3 s in, move the PC's cursor to (1234, 567) (checks the input path headless)
@@ -33,6 +36,7 @@ extern "C" {
 }
 
 #include <atomic>
+#include <functional>
 #include <mutex>
 #include <thread>
 
@@ -42,7 +46,8 @@ struct Opts {
     std::string host = "10.35.78.22", app = "Desktop", keys;
     const char *pair = nullptr, *dump = nullptr;
     int w = 5120, h = 1440, fps = 90, bitrate = 50000, dumpFrame = 300;
-    bool hevc = true, vr = true, inputTest = false;
+    bool hevc = true, vr = true, inputTest = false, wl = false;
+    int winW = 0, winH = 0;
     double panelW = 2.4, dist = 1.5, seconds = 0;
 } g_o;
 
@@ -76,6 +81,10 @@ bool g_ovShown = false;
 #endif
 bool g_needIdr = false;
 
+}  // namespace
+#include "wlwin.h"
+namespace {
+
 void Log(const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
@@ -106,18 +115,32 @@ void DrCleanup() {
     g_D.fd = -1;
 }
 
-void ShowFrame(int capIdx, int frame) {
+// Returns true when the capture buffer stays out of the decoder (window mode: until KWin
+// releases it).
+bool ShowFrame(int capIdx, int frame) {
     const int64_t c0 = MonoNs();
     double convMs = 0;
+    if (g_o.wl) {
+        const Slot &s = g_slots[frame % kSlots];
+        if (s.frame == frame) {
+            std::lock_guard<std::mutex> l(g_mu);
+            for (Window *w : {&g_win, &g_all}) {
+                w->decMs.push_back((c0 - s.tQueued) / 1e6), w->convMs.push_back(0);
+                if (s.hostMs > 0) w->hostMs.push_back(s.hostMs);
+            }
+        }
+        WlQueueFrame(capIdx, frame);
+        return true;
+    }
 #ifdef FTRD_GL
     if (!g_rgbReady) {
         g_rgb.bt709 = true;  // Sunshine is asked for BT.709 limited range (COLORSPACE_REC_709)
-        if (!RgbInit(g_rgb, int(g_D.visible.width), int(g_D.visible.height))) { g_stop = 1; return; }
+        if (!RgbInit(g_rgb, int(g_D.visible.width), int(g_D.visible.height))) { g_stop = 1; return false; }
         g_rgbReady = true;
     }
     Rgb::Out *ro = RgbConvert(g_rgb, g_D, capIdx);
     convMs = (MonoNs() - c0) / 1e6;
-    if (!ro) return;
+    if (!ro) return false;
     if (g_o.dump && int(g_shown.load()) == g_o.dumpFrame) {
         std::vector<uint8_t> px(size_t(g_rgb.w) * size_t(g_rgb.h) * 4);
         glReadPixels(0, 0, g_rgb.w, g_rgb.h, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
@@ -137,7 +160,7 @@ void ShowFrame(int capIdx, int frame) {
             if (!vr::VRIPCResourceManager()->ImportDmabuf(vr::VRApplication_Overlay, &a, &h) || !h) {
                 printf("vr: ImportDmabuf failed for the converted frame; stopping\n");
                 g_stop = 1;
-                return;
+                return false;
             }
             ro->vr = h;
         }
@@ -160,6 +183,7 @@ void ShowFrame(int capIdx, int frame) {
         }
     }
     ++g_shown;
+    return false;
 }
 
 // Reclaim bitstream buffers, handle events, show decoded frames. Returns once frame `target`
@@ -186,7 +210,10 @@ void Pump(int target, int timeoutMs) {
                 ++g_decodeErrors;
                 g_needIdr = true;
             } else if (pl[0].bytesused > 0) {
-                ShowFrame(int(b.index), frame);
+                if (ShowFrame(int(b.index), frame)) {  // window mode: KWin gives it back
+                    if (frame >= target) gotTarget = true;
+                    continue;
+                }
             }
             QueueCap(g_D, int(b.index));
             if (frame >= target) gotTarget = true;
@@ -363,7 +390,7 @@ void PollInput() {
             case vr::VREvent_ScrollDiscrete: {  // notches; positive = up/right, as on the PC
                 const int dy = int(std::lround(ev.data.scroll.ydelta)), dx = int(std::lround(ev.data.scroll.xdelta));
                 if (dy) LiSendScrollEvent((signed char)std::clamp(dy, -127, 127));
-                if (dx) LiSendHScrollEvent((signed char)std::clamp(dx, -127, 127));
+                if (dx) LiSendHScrollEvent((signed char)std::clamp(-dx, -127, 127));  // SteamVR +x = left (as in screens/vr.cpp)
                 ++g_inScrolls;
                 break;
             }
@@ -467,6 +494,10 @@ int main(int argc, char **argv) {
         else if (a == "--distance") g_o.dist = atof(next());
         else if (a == "--seconds") g_o.seconds = atof(next());
         else if (a == "--novr") g_o.vr = false;
+        else if (a == "--window") {
+            g_o.wl = true, g_o.vr = false;
+            if (i + 1 < argc && argv[i + 1][0] != '-') sscanf(argv[++i], "%dx%d", &g_o.winW, &g_o.winH);
+        }
         else if (a == "--input-test") g_o.inputTest = true;  // 3 s in: move the PC's cursor to (1234, 567)
         else if (a == "--dump") g_o.dump = next();
         else if (a == "--dump-frame") g_o.dumpFrame = atoi(next());
@@ -547,6 +578,8 @@ int main(int argc, char **argv) {
     }
 #endif
 
+    if (g_o.wl && !WlInit(g_o.w, g_o.h, g_o.winW ? g_o.winW : g_o.w, g_o.winH ? g_o.winH : g_o.h)) return 1;
+
     r = gs_start_app(&server, &cfg, appId, false, true /* audio stays on the PC */, 0);
     if (r != GS_OK) return fprintf(stderr, "starting %s failed (%d): %s\n", g_o.app.c_str(), r, gs_error ? gs_error : ""), 1;
     printf("app: %s started at %dx%d %d fps %d kbps %s\n", g_o.app.c_str(), cfg.width, cfg.height, cfg.fps,
@@ -577,8 +610,21 @@ int main(int argc, char **argv) {
     const CpuStat cpu0 = ReadCpu();
     int64_t lastSample = MonoNs();
     bool inputTested = false;
+    auto committed = [](int frame) {  // window mode: a frame went to KWin
+        const Slot &s = g_slots[frame % kSlots];
+        if (s.frame != frame) return;
+        const double client = (LiGetMicroseconds() - s.recvUs) / 1e3;
+        std::lock_guard<std::mutex> l(g_mu);
+        for (Window *w : {&g_win, &g_all}) ++w->frames, w->clientMs.push_back(client);
+        ++g_shown;
+    };
     while (!g_stop && !g_terminated) {
-        usleep(4000);
+        if (g_o.wl) {
+            WlPoll(50, committed);
+            if (g_wl.closed) { printf("window: closed\n"); break; }
+        } else {
+            usleep(4000);
+        }
         const int64_t now = MonoNs();
 #ifdef FTRD_VR
         if (g_o.vr) {
@@ -607,6 +653,10 @@ int main(int argc, char **argv) {
         if (g_kbShown) vr::VROverlay()->HideKeyboard();
     }
 #endif
+    if (g_o.wl) {
+        WlReleaseKeys();
+        PtrLeave(nullptr, nullptr, 0, nullptr);  // releases the PC's mouse buttons
+    }
     LiStopConnection();
     gs_quit_app(&server);
     {
@@ -614,6 +664,10 @@ int main(int argc, char **argv) {
         printf("\nRESULT %s %dx%d %s %d kbps, %.1f s, %llu frames shown\n", g_o.host.c_str(), g_o.w, g_o.h,
                g_o.hevc ? "HEVC" : "H.264", g_o.bitrate, wall, (unsigned long long)g_shown.load());
         PrintWindow("  all", g_all, wall);
+        if (g_o.wl)
+            printf("  window: %llu commits; input %llu moves, %llu clicks, %llu scrolls, %llu keys\n",
+                   (unsigned long long)g_wl.commits, (unsigned long long)g_wl.moves, (unsigned long long)g_wl.clicks,
+                   (unsigned long long)g_wl.scrolls, (unsigned long long)g_wl.keys);
         printf("  SoC busy %.1f%% of 8 cores\n",
                cpu1.total > cpu0.total ? 100.0 * double(cpu1.busy - cpu0.busy) / double(cpu1.total - cpu0.total) : NAN);
     }

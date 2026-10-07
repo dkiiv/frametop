@@ -73,6 +73,11 @@ Desktop Streamer uses it).
 
 - [ ] Detect VR game focus (Frametop already knows — see `power/`, session
       docs); suspend stream + release decoder cleanly on game start.
+- [ ] **Lasers off during VR games, like Frametop's screens** (Curtis, 2026-10-07): the
+      panel sets `MakeOverlaysInteractiveIfVisible` (M3), which takes the controllers away
+      from a running scene app. Clear it (and the keyboard button's) while a game runs; only
+      the 3D mouse or the dashboard should reach the panel then (see screens/vr.cpp's
+      outside_games mode and UpdateAim).
 - [ ] Restore on game exit without a SteamVR restart.
 - [ ] Measure: does a suspended stream actually free the decoder budget?
 
