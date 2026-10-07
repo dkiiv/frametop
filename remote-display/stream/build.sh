@@ -21,6 +21,14 @@ if [ ! -f $me/.pin-$pin ]; then
   git -C $me submodule update -q --init --recursive third_party/moonlight-common-c
   touch $me/.pin-$pin
 fi
+# Close every HTTPS connection after its request (libgamestream does so only on FreeBSD).
+# Otherwise curl keeps the TLS connection of the launch request open for the whole stream, and
+# the GameStream HTTPS server of Vibepollo 2.0.0 stops answering anyone (incl. a second client)
+# while that idle connection is open.
+if ! grep -q "ftrd: always forbid reuse" $me/libgamestream/http.c; then
+  sed -i "s|^#ifdef __FreeBSD__\$|#if 1 /* ftrd: always forbid reuse (was __FreeBSD__) */|" $me/libgamestream/http.c
+fi
+grep -q "ftrd: always forbid reuse" $me/libgamestream/http.c || { echo "http.c patch failed"; exit 1; }
 openvr=v2.15.6
 [ -f build/include/openvr-$openvr ] || { curl -fsSL "https://raw.githubusercontent.com/ValveSoftware/openvr/$openvr/headers/openvr.h" -o build/include/openvr.h && touch build/include/openvr-$openvr; }
 mcc=$me/third_party/moonlight-common-c

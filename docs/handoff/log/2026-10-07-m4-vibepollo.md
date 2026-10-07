@@ -40,9 +40,24 @@ Measured:
   clients; Desktop at another size switches Windows to a virtual display exclusively.
 
 Open:
-- Multiple simultaneous virtual displays (Curtis's requirement) blocked on the host. Options:
-  report to Vibepollo upstream (logs need scrubbing: client UUIDs, device IDs, host name);
-  try Nonary's Moonlight fork / moonlight-qt from the Frame to see if the stall is client-side;
-  fall back to one virtual display per stream sequentially.
+- **Update 14:00 — root cause of "two at once" found, on our side.** libgamestream sets
+  CURLOPT_FORBID_REUSE only on FreeBSD, so on Linux curl kept the launch request's TLS
+  connection idle-open for the whole stream (`ss`: ftrd-stream ESTAB to :47984; host side
+  CloseWait pile-up), and Vibepollo's GameStream HTTPS server answered nobody while it was open
+  (stream/https-probe.sh: 000 for the whole stream, 200 at 0.08 s with the fix). build.sh now
+  patches http.c to always forbid reuse. Result (multi-test.sh, 14:01): identity 2 started 3 s
+  into identity 1's stream; **two Remote Monitors at once**, 2560x1440 + 1920x1080, both 0 lost,
+  host 2.4 / 1.6 ms, Frame SoC 6 %. Windows showed both virtual monitors beside the physical ones.
+- **Host problem left: Vibepollo rearranges the physical monitors.** Its topology apply
+  (SetDisplayConfig with SDC_VIRTUAL_MODE_AWARE) fails with ERROR_INVALID_PARAMETER on this PC
+  on every Remote Monitor start/stop (in the log since the first run, 13:14), it falls back to a
+  "topology jog", and the ultrawide's origin can't be set ("failed to move device ... to new
+  origin"): Windows ends up with the 1080p monitor primary at 0,0 and the ultrawide beside it;
+  once the ultrawide also dropped to 120 Hz. A restore script (outside the repo, in
+  ~/.local/share/ftrd on the WSL side) puts it back; used after every test. Suspects: the other
+  virtual display drivers on the PC (SudoVDA kept by Vibepollo, Virtual Desktop's monitor), HDR
+  on the ultrawide, or a Vibepollo bug. Needs Curtis before changing drivers/settings.
+- Multiple simultaneous virtual displays (Curtis's requirement): works on the stream side now;
+  blocked in practice by the layout problem above.
 - Remote-monitor retention: `remote_monitor_disconnect_on_stream_end` (Vibepollo setting)
   would make the release step unnecessary.
