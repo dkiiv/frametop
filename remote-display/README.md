@@ -15,7 +15,7 @@ You need a Steam Frame and a Windows 10/11 PC with a GPU that can encode HEVC (N
 Intel), on the same network. Valve's USB Wi-Fi adapter for the PC gives the lowest latency (about
 3 ms here), but home Wi-Fi works.
 
-## Set it up (once): one line on each device
+## Set it up (once): from the PC
 
 ### 1. On the PC (a few minutes)
 
@@ -27,27 +27,50 @@ Click **Yes** when Windows asks. It installs [Vibepollo](https://github.com/Nona
 2.0.0 (the streaming host: a Sunshine fork that makes a virtual monitor per device; it replaces
 Sunshine if you have it), and a small Remote PC helper that pairs the Frame for you and keeps
 your monitor layout in order. It shows the login it made for Vibepollo's own settings page; you
-rarely need it (`ftrd-host.ps1 -ShowLogin` shows it again). Arrange your physical monitors the
+rarely need it (`-ShowLogin` shows it again; the helper's commands in this guide run in PowerShell
+as `powershell -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\ftrd\ftrd-host.ps1" -Command`). Arrange your physical monitors the
 way you like them before you run it: that's the layout the helper keeps.
 
-### 2. On the Frame (about 15 minutes, mostly downloading)
+### 2. On the Frame, from the PC over SSH (about 15 minutes, mostly downloading)
 
-In the headset: Launch a program → Desktop, then the application menu → System → Konsole, and
-type (a Bluetooth keyboard helps; the on-screen keyboard works too):
+Everything on the Frame runs from the PC's PowerShell over SSH (Windows 10/11 has `ssh`
+built in), so you only put the headset on at the end.
+
+**Once, in the headset: turn SSH on.** Turn on developer mode in Steam's settings. Then Launch a
+program → Desktop, open the application menu → System → Konsole, and run (it asks you to choose
+a password for the headset's `steamos` user, then for that password again):
 ```
-curl -fsSL https://raw.githubusercontent.com/dkiiv/frametop/remote-display-poc-handoff/remote-display/get.sh | bash
+passwd
+sudo systemctl enable --now sshd
+ip -4 addr show wlan0 | grep inet
 ```
-It installs Frametop (the multi-screen desktop Remote PC runs in) with Remote PC included. Press
-Enter at its questions to take the defaults; at the end, let it restart SteamVR (or restart the
-headset). It's the same installer as Frametop's own, see the main [README](../README.md) for what
-the questions mean. If something fails, run the same line again: it picks up where it stopped.
+The last line shows the Frame's address on your Wi-Fi (`inet 192.168.x.y/24`: the part before
+the `/`). Use it as `FRAME` below. Keep the Frame on its charger or stand while installing: it
+goes to sleep after a while without input (Frametop Display Settings → Power, after the install,
+can keep it awake while plugged in).
+
+**Install Frametop with Remote PC:**
+```
+ssh -t steamos@FRAME "curl -fsSL https://raw.githubusercontent.com/dkiiv/frametop/remote-display-poc-handoff/remote-display/get.sh | bash"
+```
+Enter the `steamos` password, then press Enter at the installer's questions to take the
+defaults; at the end, answer **y** to restart SteamVR. It's the same installer as Frametop's own
+(see the main [README](../README.md) for what the questions mean). The `-t` matters: without it
+the questions can't reach you. If the connection drops or something fails, run the same line
+again; it picks up where it stopped.
+
+**Pair** (within 30 minutes of step 1):
+```
+ssh -t steamos@FRAME "~/frametop/remote-display/stream/stream.sh setup"
+```
+It finds your PC and pairs two monitors with it (`setup 3` for three, up to 4), nothing to type:
+within 30 minutes of step 1 the PC agrees by itself. Later, the PC asks first (a window on its
+screen: click Yes; or run `powershell -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\ftrd\ftrd-host.ps1" -AllowPairing` before).
 
 ### 3. In the headset
 
-Launch a program → Desktop, then Steam button → **+** → **Remote PC**. The first time, a window
-opens, finds your PC and pairs two monitors with it; nothing to type. Within 30 minutes of step 1
-the PC agrees by itself; after that, the PC asks first (a window on its screen: click Yes; or run
-`ftrd-host.ps1 -AllowPairing` there). Then your monitors open.
+Launch a program → Desktop, then Steam button → **+** → **Remote PC**: your monitors open.
+(Skipped the pairing above? Then the first click on Remote PC opens a window that does it.)
 
 To type, map a controller button to Frametop's keyboard in Frametop Input Settings (any button
 but the system "..." button, which belongs to SteamVR).
@@ -78,24 +101,25 @@ and logged in).
   two aren't on the same network.
 - **Your physical monitors are rearranged or at a lower refresh rate:** Vibepollo 2.0.0 shuffles
   them when virtual monitors come and go; the helper puts them back within seconds. After
-  changing your layout on purpose: `ftrd-host.ps1 -SaveBaseline`.
+  changing your layout on purpose: `powershell -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\ftrd\ftrd-host.ps1" -SaveBaseline`.
 - **A virtual monitor stays in Windows after you closed everything** (Vibepollo 2.0.0 sometimes
   keeps one): the helper removes it after 30 seconds.
 - **Physical monitors dark:** Win+P → Extend. (This happened with Vibepollo's "Desktop" app, which
   makes its virtual screen the only display; Remote PC never starts that app.)
-- **A panel stays dark:** `~/frametop/remote-display/stream/stream.sh status` and `stream.sh log N`
-  on the Frame show what the stream is doing; on the PC,
-  `%LOCALAPPDATA%\ftrd\ftrd-host.ps1 -Status` shows the displays and what the Frame reports, and
+- **A panel stays dark:** `ssh steamos@FRAME ~/frametop/remote-display/stream/stream.sh status`
+  (and `... stream.sh log 1`) shows what the stream is doing; on the PC,
+  `powershell -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\ftrd\ftrd-host.ps1" -Status` shows the displays and what the Frame reports, and
   `%LOCALAPPDATA%\ftrd\ftrd-host.log` what the helper did.
-- **Set up again** (another PC, more monitors): `stream.sh setup` in Konsole (`setup 3` for three
-  monitors, up to 4; `setup ADDRESS` if your network blocks discovery).
+- **Set up again** (another PC, more monitors): the pairing line above again (`setup 3` for
+  three monitors, up to 4; `setup ADDRESS` if your network blocks discovery).
 
 ## Uninstall
 
-- **PC:** in PowerShell, `& "$env:LOCALAPPDATA\ftrd\ftrd-host.ps1" -Uninstall` (it asks whether
+- **PC:** in PowerShell, `powershell -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\ftrd\ftrd-host.ps1" -Uninstall` (it asks whether
   to remove Vibepollo too).
-- **Frame:** Frametop's uninstaller removes Remote PC with it: see [Uninstall](../README.md#uninstall)
-  in the main README (`~/frametop/uninstall.sh`).
+- **Frame:** Frametop's uninstaller removes Remote PC with it: `ssh -t steamos@FRAME
+  ~/frametop/uninstall.sh`, restart the headset, run it again (see [Uninstall](../README.md#uninstall)
+  in the main README).
 
 ## Limits (for now)
 
