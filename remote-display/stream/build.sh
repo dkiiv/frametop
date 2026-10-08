@@ -45,7 +45,8 @@ done
 mkdir -p build/proto
 wp=/usr/share/wayland-protocols
 for x in $wp/stable/xdg-shell/xdg-shell.xml $wp/stable/linux-dmabuf/linux-dmabuf-v1.xml \
-         $wp/stable/viewporter/viewporter.xml $wp/unstable/xdg-decoration/xdg-decoration-unstable-v1.xml; do
+         $wp/stable/viewporter/viewporter.xml $wp/unstable/xdg-decoration/xdg-decoration-unstable-v1.xml \
+         $wp/unstable/idle-inhibit/idle-inhibit-unstable-v1.xml; do
   n=$(basename $x .xml)
   [ build/proto/$n-client-protocol.h -nt $x ] || wayland-scanner client-header $x build/proto/$n-client-protocol.h
   [ build/proto/$n-protocol.c -nt $x ] || wayland-scanner private-code $x build/proto/$n-protocol.c

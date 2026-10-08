@@ -21,6 +21,7 @@
 
 #include <deque>
 
+#include "idle-inhibit-unstable-v1-client-protocol.h"
 #include "linux-dmabuf-v1-client-protocol.h"
 #include "viewporter-client-protocol.h"
 #include "xdg-decoration-unstable-v1-client-protocol.h"
@@ -40,6 +41,8 @@ struct Wl {
     wl_shm *shm = nullptr;
     zxdg_decoration_manager_v1 *decoMgr = nullptr;
     wl_seat *seat = nullptr;
+    zwp_idle_inhibit_manager_v1 *idleMgr = nullptr;
+    zwp_idle_inhibitor_v1 *idle = nullptr;  // keeps the desktop awake while this window is up
     wl_pointer *ptr = nullptr;
     wl_keyboard *kbd = nullptr;
     wl_surface *surf = nullptr;
@@ -267,6 +270,7 @@ void RegGlobal(void *, wl_registry *r, uint32_t name, const char *iface, uint32_
     else if (i == wp_viewporter_interface.name) g_wl.vp = static_cast<wp_viewporter *>(wl_registry_bind(r, name, &wp_viewporter_interface, 1));
     else if (i == zxdg_decoration_manager_v1_interface.name) g_wl.decoMgr = static_cast<zxdg_decoration_manager_v1 *>(wl_registry_bind(r, name, &zxdg_decoration_manager_v1_interface, 1));
     else if (i == wl_shm_interface.name) g_wl.shm = static_cast<wl_shm *>(wl_registry_bind(r, name, &wl_shm_interface, 1));
+    else if (i == zwp_idle_inhibit_manager_v1_interface.name) g_wl.idleMgr = static_cast<zwp_idle_inhibit_manager_v1 *>(wl_registry_bind(r, name, &zwp_idle_inhibit_manager_v1_interface, 1));
     else if (i == wl_seat_interface.name) g_wl.seat = static_cast<wl_seat *>(wl_registry_bind(r, name, &wl_seat_interface, std::min(ver, 5u)));
 }
 void RegRemove(void *, wl_registry *, uint32_t) {}
@@ -305,6 +309,11 @@ bool WlInit(int streamW, int streamH, int winW, int winH, const char *appId, con
     xdg_toplevel_add_listener(g_wl.top, &kTop, nullptr);
     xdg_toplevel_set_title(g_wl.top, title);
     xdg_toplevel_set_app_id(g_wl.top, appId);
+    // Input to the PC (a game on a gamepad, say) never reaches the desktop, so without this
+    // its idle timer dims and then blanks every Frametop output mid-game, these panels too.
+    // Like a video player: no idle while this window is up (KWin honours it while visible).
+    if (g_wl.idleMgr) g_wl.idle = zwp_idle_inhibit_manager_v1_create_inhibitor(g_wl.idleMgr, g_wl.surf);
+    else fprintf(stderr, "window: compositor lacks idle-inhibit; the desktop may dim while streaming\n");
     if (g_wl.decoMgr) {
         auto *d = zxdg_decoration_manager_v1_get_toplevel_decoration(g_wl.decoMgr, g_wl.top);
         zxdg_toplevel_decoration_v1_set_mode(d, ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
