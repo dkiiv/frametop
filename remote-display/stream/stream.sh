@@ -5,7 +5,7 @@
 #   stream.sh off [N|all]                       stop instance N (default: all)
 #   stream.sh status                            running instances + their last stats line
 #   stream.sh log [N]                           follow instance N's log
-#   stream.sh setup [PC address] [monitors]     first-time setup: build, pair, menu entry (remote-display/README.md)
+#   stream.sh setup [monitors] [PC address]     first-time setup: find the PC, build, pair, menu entry
 #   stream.sh pair [-i N] PIN                   pair identity N (enter the PIN in Vibepollo's web UI)
 #   stream.sh float [N]                         instance N as a Vibepollo "Remote Monitor" (a virtual
 #                                               monitor on the PC) in its own Frametop panel; resizing
@@ -34,8 +34,19 @@ bin=$here/build/ftrd-stream
 dir=$HOME/.cache/frametop-remote-display
 mkdir -p "$dir"
 conf=$HOME/.config/frametop-remote-display
-pchost() { cat "$conf/host" 2>/dev/null; }  # the PC's address (stream.sh setup), else ftrd-stream's default
-hostopt() { case " $* " in *" --host "*) ;; *) h=$(pchost); [ -n "$h" ] && echo "--host $h" ;; esac; }
+# The PC's current address: ftrd-find-pc.py finds the PC paired at setup by its Vibepollo id
+# (last address, the Frame's hotspot, mDNS, a scan); nothing to type.
+pchost() { python3 "$here/ftrd-find-pc.py" 2>/dev/null; }
+hostopt() { case " $* " in *" --host "*) ;; *) [ -n "${PCHOST:-}" ] && echo "--host $PCHOST" ;; esac; }
+say() {  # a message where the user is: the terminal, else a desktop notification
+  echo "$*"
+  [ -t 1 ] || notify-send -a "Remote PC" "Remote PC" "$*" 2>/dev/null || true
+}
+case ${1:-} in on|pair|cleanup)
+  if [ -f "$conf/host" ] || [ -f "$conf/host-id" ]; then
+    PCHOST=$(pchost) || { say "Can't find your PC: is it on and awake, with Vibepollo running, on the Frame's network?"; exit 1; }
+  fi ;;
+esac
 keys() { if [ "$1" = 1 ]; then echo "$HOME/.config/frametop-remote-display"; else echo "$HOME/.config/frametop-remote-display/$1"; fi; }
 pidof_i() { local p; p=$(cat "$dir/stream-$1.pid" 2>/dev/null) || return 1; kill -0 "$p" 2>/dev/null && echo "$p"; }
 instances() { for f in "$dir"/stream-*.pid; do [ -e "$f" ] || continue; n=${f##*/stream-}; echo "${n%.pid}"; done; }
@@ -95,18 +106,28 @@ case ${1:-status} in
     mkdir -p "$(keys "$n")"; chmod 700 "$(keys "$n")"
     # shellcheck disable=SC2046
     exec "$bin" --keys "$(keys "$n")" $(hostopt) --pair "$1" ;;
-  setup)  # first-time setup: stream.sh setup [PC address] [monitors (1-4, default 2)]
+  setup)  # first-time setup: stream.sh setup [monitors (1-4, default 2)] [PC address (default: found)]
     shift
-    h=${1:-$(pchost)}; count=${2:-2}
+    h=; count=2
+    for a in "$@"; do case $a in [1-4]) count=$a ;; *) h=$a ;; esac; done
     if [ -z "$h" ]; then
-      if ping -c1 -W1 10.35.78.22 >/dev/null 2>&1; then h=10.35.78.22  # the PC end of Valve's USB Wi-Fi adapter
-      else echo "usage: stream.sh setup PC-ADDRESS [MONITORS]   (the PC's IP address: ipconfig on the PC)"; exit 2; fi
+      echo "== looking for your PC (Vibepollo) on the network..."
+      mapfile -t pcs < <(python3 "$here/ftrd-find-pc.py" --list)
+      if [ ${#pcs[@]} -eq 0 ]; then
+        echo "No PC with Vibepollo found. Is it installed and running, and is the PC on the Frame's"
+        echo "network (or Valve's USB adapter plugged in)? You can also give its address: stream.sh setup ADDRESS"
+        exit 1
+      elif [ ${#pcs[@]} -eq 1 ]; then h=${pcs[0]%% *}
+      else
+        echo "Several PCs found:"; i=1; for l in "${pcs[@]}"; do echo "  $i) $(echo "$l" | cut -d' ' -f1-2)"; i=$((i + 1)); done
+        read -r -p "Which one? [1] " c; c=${c:-1}; h=$(echo "${pcs[$((c - 1))]}" | cut -d' ' -f1)
+      fi
     fi
     case $count in [1-4]) ;; *) echo "monitors: 1 to 4"; exit 2 ;; esac
-    mkdir -p "$conf"; chmod 700 "$conf"; echo "$h" > "$conf/host"
-    echo "== PC: $h"
-    curl -sk --max-time 5 "https://$h:47984/serverinfo" >/dev/null 2>&1 || curl -s --max-time 5 "http://$h:47989/serverinfo" >/dev/null 2>&1 ||
+    mkdir -p "$conf"; chmod 700 "$conf"
+    python3 "$here/ftrd-find-pc.py" --remember "$h" >/dev/null ||
       { echo "no Vibepollo answering at $h (is it installed and running? same network?)"; exit 1; }
+    echo "== PC: $h"
     for n in $(seq 1 "$count"); do
       k=$(keys "$n")
       if [ -f "$k/uniqueid.dat" ] && "$bin" --keys "$k" --host "$h" --check >/dev/null 2>&1; then
@@ -172,5 +193,5 @@ case ${1:-status} in
     printf '[Desktop Entry]\nType=Application\nName=Remote PC\nComment=Your Windows PC'"'"'s virtual monitors, each in its own panel\nExec=sh -c "%s float-all"\nIcon=preferences-desktop-remote-desktop\nTerminal=false\nCategories=Network;RemoteAccess;\n' \
       "$s" > "$apps/org.frametop.RemotePC.desktop"
     echo "shown: Remote PC; hidden: $(cd "$apps" && grep -l NoDisplay=true org.frametop.Remote*.desktop | tr '\n' ' ')" ;;
-  *) echo "usage: stream.sh on [-i N] [opts]|off [N|all]|status|log [N]|setup [PC] [N]|pair [-i N] PIN|float [N]|float-all|cleanup|install-desktop"; exit 2 ;;
+  *) echo "usage: stream.sh on [-i N] [opts]|off [N|all]|status|log [N]|setup [N] [PC]|pair [-i N] PIN|float [N]|float-all|cleanup|install-desktop"; exit 2 ;;
 esac

@@ -37,9 +37,7 @@ edges elsewhere.
 
 1. Install Vibepollo (`VibepolloSetup-v2.0.0.exe`). Open https://localhost:47990 and create
    the web UI login it asks for.
-2. Note the PC's IP address (`ipconfig`, the adapter on the Frame's network). With Valve's USB
-   adapter you can skip this.
-3. Optional but recommended: the layout keeper. In PowerShell (as yourself, no admin):
+2. Optional but recommended: the layout keeper. In PowerShell (as yourself, no admin):
    ```
    $f = "$env:TEMP\ftrd-host.ps1"
    irm https://raw.githubusercontent.com/dkiiv/frametop/remote-display-poc-handoff/remote-display/host/ftrd-host.ps1 -OutFile $f
@@ -53,12 +51,13 @@ edges elsewhere.
 
 In the Frametop desktop, open Konsole (or SSH in) and run:
 ```
-~/frametop/remote-display/stream/stream.sh setup [PC address] [number of monitors]
+~/frametop/remote-display/stream/stream.sh setup
 ```
-for example `stream.sh setup 192.168.1.20 2`. Leave out the address with Valve's USB adapter;
-monitors default to 2 (up to 4). The first run builds the client (a few minutes). Then, for each
-monitor, it shows a PIN: on the PC, open https://localhost:47990 → PIN, enter it, and name the
-device as it says ("Frame monitor 1", ...).
+It finds your PC by itself (Vibepollo announces itself on the network; with Valve's USB adapter
+the Frame sees it directly), so there's no address to type, and sets up 2 monitors (`setup 3` for
+3, up to 4). If it finds several PCs it asks which one. The first run builds the client (a few
+minutes). Then, for each monitor, it shows a PIN: on the PC, open https://localhost:47990 → PIN,
+enter it, and name the device as it says ("Frame monitor 1", ...).
 
 Vibepollo gives full rights only to the first device it pairs. For monitors 2 and up, open the
 web UI → Clients, and give each "Frame monitor N" the Launch and input (mouse, keyboard)
@@ -94,6 +93,11 @@ Moving windows from your physical monitors onto a virtual one: Win+Shift+Left/Ri
   saved layout back now; re-save with `-SaveBaseline` after changing it on purpose.
 - **Physical monitors dark:** Win+P → Extend. (This happened with Vibepollo's "Desktop" app, which
   makes its virtual screen the only display; Remote PC refuses to start that app.)
+- **"Can't find your PC":** Remote PC looks for the PC you paired by its Vibepollo id every time
+  it opens (where it was last time, on the Frame's own hotspot, by mDNS, then by a quick scan of
+  the network), so a new address doesn't matter. This means the PC is off or asleep, Vibepollo
+  isn't running, or the two aren't on the same network. If your network blocks discovery and
+  scanning, give the address once: `stream.sh setup ADDRESS`.
 - **A panel stays dark:** `stream.sh status` and `stream.sh log N` on the Frame show what the
   stream is doing; `ftrd-host.ps1 -Status` on the PC shows the displays and what the Frame reports.
 
