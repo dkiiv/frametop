@@ -6,10 +6,13 @@
 // opens SteamVR's keyboard, whose characters go over as text (and Backspace/Enter/Tab/Esc/arrows
 // as keys).
 //
-//   ftrd-stream --pair PIN                 pair with Sunshine (enter PIN in Sunshine's web UI)
-//   ftrd-stream [options]                  stream the "Desktop" app onto a panel
+//   ftrd-stream --pair PIN                 pair with Vibepollo (enter PIN in its web UI)
+//   ftrd-stream --check                    exit 0 if this identity is paired, 3 if not
+//   ftrd-stream [options]                  a Vibepollo "Remote Monitor" (a virtual monitor) onto a panel
 //     --host IP         Sunshine host (default 10.35.78.22: the PC end of the Valve USB adapter)
-//     --size WxH        stream size (default 5120x1440, the PC's ultrawide)   --fps N (90)
+//     --size WxH        stream size (default 2560x1440)   --fps N (90)
+//     --app NAME        host app (default "Remote Monitor"). Not "Desktop" on Vibepollo: that one
+//                       makes its virtual screen the PC's only display. --app-id N: by id.
 //     --bitrate KBPS    (default 50000)   --codec hevc|h264 (hevc)
 //     --panel-width M   panel width in metres (2.4)   --distance M (1.5)
 //     --seconds S       stop after S seconds (default: until SIGINT/SIGTERM)
@@ -53,9 +56,10 @@ extern "C" {
 namespace {
 
 struct Opts {
-    std::string host = "10.35.78.22", app = "Desktop", keys;
+    std::string host = "10.35.78.22", app = "Remote Monitor", keys;
     const char *pair = nullptr, *dump = nullptr;
-    int w = 5120, h = 1440, fps = 90, bitrate = 50000, dumpFrame = 300;
+    int w = 2560, h = 1440, fps = 90, bitrate = 50000, dumpFrame = 300;
+    bool check = false;  // --check: only report whether this identity is paired (exit 0) or not (3)
     bool hevc = true, vr = true, inputTest = false, wl = false, follow = false, followSet = false, yield = true;
     std::string wlId = "org.frametop.RemoteDisplay", wlTitle = "Remote PC";
     int appId = -1;
@@ -559,6 +563,7 @@ int main(int argc, char **argv) {
         std::string a = argv[i];
         auto next = [&]() -> const char * { return i + 1 < argc ? argv[++i] : ""; };
         if (a == "--pair") g_o.pair = next();
+        else if (a == "--check") g_o.check = true;
         else if (a == "--host") g_o.host = next();
         else if (a == "--app") g_o.app = next();
         else if (a == "--app-id") g_o.appId = atoi(next());  // e.g. a Vibepollo control the list hides
@@ -602,6 +607,12 @@ int main(int argc, char **argv) {
         if (r != GS_OK) return fprintf(stderr, "pairing failed (%d): %s\n", r, gs_error ? gs_error : ""), 1;
         return printf("paired\n"), 0;
     }
+    if (g_o.check) return server.paired ? 0 : 3;
+    // Vibepollo's "Desktop" app makes its own virtual screen the PC's only display (the physical
+    // monitors go dark until it lets go); id 0 starts it too.
+    if ((g_o.app == "Desktop" || g_o.appId == 0) && !getenv("FTRD_ALLOW_DESKTOP"))
+        return fprintf(stderr, "refusing the \"Desktop\" app (on Vibepollo it blanks the PC's monitors); "
+                               "FTRD_ALLOW_DESKTOP=1 to force\n"), 1;
     if (!server.paired) return fprintf(stderr, "not paired: run with --pair PIN first\n"), 1;
 
     PAPP_LIST apps = nullptr;

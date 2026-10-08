@@ -1,5 +1,9 @@
 # 04 — Milestones
 
+**Status (2026-10-07):** M0–M4 and M6 done. M5 done except a worn test with a real VR game.
+Open: the items under "Open items to revisit", comparing with the Frametop dev's design (M4),
+and the backlog (audio, auto-reconnect, codec bake-off). User guide: remote-display/README.md.
+
 Each milestone ends with: (a) something verifiable, (b) a `log/` entry, (c) a
 push. Stop and ask Curtis when a milestone says ASK. Do not run ahead of a
 blocked milestone by guessing.
@@ -10,47 +14,47 @@ Goal: answer "can the Frame hardware-decode a 1080p60 HEVC/H.264 stream while
 passthrough is running, and can the decoded frames leave the decoder as
 DMA-BUFs?"
 
-- [ ] On the Frame (dev container or host), enumerate decode APIs:
+- [x] On the Frame (dev container or host), enumerate decode APIs:
       `v4l2-ctl --list-devices`, `ls /dev/video*`, `vainfo`/`vulkaninfo`
       (video decode profiles), mesa driver in use (`glxinfo`/`dri`), presence
       of any vendor MPP/codec libs.
-- [ ] Play a 1080p60 test file (download one to the Frame) with every
+- [x] Play a 1080p60 test file (download one to the Frame) with every
       hardware-ish path you found; record fps + CPU% + whether frames exit as
       dmabuf (e.g. `ffprobe -hwaccel` variants, `mpv --vo=gpu --hwdec=...`).
-- [ ] Repeat while the headset is worn (passthrough active) — Curtis wears it.
-- [ ] Write the numbers into `log/`.
+- [x] Repeat while the headset is worn (passthrough active) — Curtis wears it.
+- [x] Write the numbers into `log/`.
 
 **Gate:** if no path holds 1080p60 with headroom → STOP, report to Curtis,
 project pivots to "document why + what Valve would need to expose".
 
 ## M1 — Sunshine sender on Windows (ASL: needs Curtis at the PC)
 
-- [ ] Curtis installs Sunshine on the Windows PC (or agent via SSH if set up).
-- [ ] Verify a stock Moonlight client (phone/laptop app) streams the PC fine —
+- [x] Curtis installs Sunshine on the Windows PC (or agent via SSH if set up).
+- [x] Verify a stock Moonlight client (phone/laptop app) streams the PC fine —
       proves encoder/network before Frame variables enter.
-- [ ] Note GPU encoder used (NVENC/AMF/QuickSync), codec, latency numbers.
+- [x] Note GPU encoder used (NVENC/AMF/QuickSync), codec, latency numbers.
 
 ## M2 — Standalone overlay POC (the demo)
 
 Goal: Windows desktop visible as a SteamVR overlay panel on the Frame.
 Deliberately NOT wired into ft-screens yet — standalone app, throwaway.
 
-- [ ] Skeleton: receive Sunshine/Moonlight stream (vendor moonlight-common or
+- [x] Skeleton: receive Sunshine/Moonlight stream (vendor moonlight-common or
       hand-roll the RTSP handshake + RTP for ONE fixed config).
-- [ ] Decode via the M0-winning path → dmabuf.
-- [ ] Import via OpenVR `IVRIPCResourceManagerClient::ImportDmabuf`
+- [x] Decode via the M0-winning path → dmabuf.
+- [x] Import via OpenVR `IVRIPCResourceManagerClient::ImportDmabuf`
       (copy the pattern from `screens/vr.cpp`; build like the pointer driver
       if it must run on the host, else in-container overlay).
-- [ ] Toggle script: start/stop the stream overlay without touching SteamVR.
-- [ ] ASK Curtis: put it on, report quality/latency; iterate codec/bitrate.
+- [x] Toggle script: start/stop the stream overlay without touching SteamVR.
+- [x] ASK Curtis: put it on, report quality/latency; iterate codec/bitrate.
 
 ## M3 — Input back-channel
 
-- [ ] Map Frametop pointer (the 3D-mouse dot / controller laser ray → panel UV)
+- [x] Map Frametop pointer (the 3D-mouse dot / controller laser ray → panel UV)
       to Moonlight absolute-mouse packets; clicks + wheel.
-- [ ] Keyboard: reuse Frametop's VR keyboard / input relay output as the key
+- [x] Keyboard: reuse Frametop's VR keyboard / input relay output as the key
       event source into Moonlight keyboard packets.
-- [ ] Cursor: hide Windows cursor, draw ours (or accept double cursor for POC).
+- [x] Cursor: hide Windows cursor, draw ours (or accept double cursor for POC).
 
 ## M4 — Behaves like a local screen
 
@@ -69,18 +73,21 @@ Desktop Streamer uses it).
       Monitor reconnects at the window's size (~5 s); the PC's virtual monitor takes it.
 - [x] Several virtual monitors at once (one per paired identity, up to 4 in Vibepollo).
 - [ ] This is where you compare against the dev's design when it lands —
-      rebase or throw away, his call via Curtis.
+      rebase or throw away, his call via Curtis. (Waiting on the dev.)
 
 ### Known limitations (host: Vibepollo 2.0.0) — expected to be fixed upstream; revisit if not
 - Vibepollo doesn't remember the PC's monitor layout (confirmed by the Frametop dev). With
   Curtis's layout (ultrawide primary at 0,0, 1080p below it) its first Remote Monitor start fails
   ("composed display topology did not apply") and leaves Windows' default arrangement.
-  Workarounds: ftrd-stream releases and retries (up to 3x); a user-level watcher on the PC
-  (Startup folder, outside the repo; notes in ~/.local/share/ftrd on WSL) restores the layout
-  whenever it's wrong, during and after sessions. Monitors visibly rearrange for a few seconds
-  at each start/resize.
+  Workarounds: ftrd-stream releases and retries (backing off); remote-display/host/ftrd-host.ps1
+  (M6) restores the layout whenever it's wrong. Monitors visibly rearrange for a few seconds at
+  each start/resize.
 - With two clients, Vibepollo sometimes keeps one virtual monitor after both released
-  ("Deferring virtual display cleanup..."); a start+release by each identity clears it.
+  ("Deferring virtual display cleanup..."); `stream.sh cleanup` (a start+release by each
+  identity) clears it, or ftrd-host.ps1 with a Vibepollo API token.
+- Vibepollo's "Desktop" app makes its virtual screen the PC's ONLY display (physical monitors
+  dark; twice in this project). ftrd-stream refuses it (FTRD_ALLOW_DESKTOP=1 to force); its
+  default app is "Remote Monitor".
 - Each extra virtual monitor needs its own paired identity, with Launch + input permissions
   granted by hand in the web UI (Vibepollo gives full permissions only to the first pairing).
 - Untested: Vibepollo's `remote_monitor_disconnect_on_stream_end` setting, pre-release builds.
@@ -102,11 +109,10 @@ Desktop Streamer uses it).
 
 - [x] Detect VR game focus (ft-screens "state"); suspend stream + release decoder cleanly on
       game start (headless: 0.1 s, decoder closed, 0 kB/s). Worn test with a real game pending.
-- [ ] **Lasers off during VR games, like Frametop's screens** (Curtis, 2026-10-07): the
-      panel sets `MakeOverlaysInteractiveIfVisible` (M3), which takes the controllers away
-      from a running scene app. Clear it (and the keyboard button's) while a game runs; only
-      the 3D mouse or the dashboard should reach the panel then (see screens/vr.cpp's
-      outside_games mode and UpdateAim).
+- [x] **Lasers off during VR games, like Frametop's screens** (Curtis, 2026-10-07): window mode
+      (the default now) is a Frametop panel, so Frametop's own in-game rules apply; overlay mode
+      hides its panel and keyboard button while yielding, so nothing takes the controllers.
+      Worn test with a real game pending (with the yield test above).
 - [x] Restore on game exit without a SteamVR restart (headless: 1.4 s via Vibepollo's Resume).
 - [x] Measure: does a suspended stream actually free the decoder budget? (decoder fd closed)
 
@@ -116,8 +122,12 @@ Desktop Streamer uses it).
       remote-display/host/README.md.
 - [x] Virtual monitors held right of the physical ones, in the Frame's order (tested: one moved
       left of the ultrawide was put back in ~12 s, in Frame order).
-- [ ] Panel poses live (needs ft-floatd with `list apps`, i.e. a Frametop desktop restart), then
-      a worn test: swap the panels, check Windows swaps the monitors.
+- [x] Panel poses live (ft-floatd `list apps`); worn: Curtis stacked the panels and Windows
+      stacked the monitors with one change (20:29); deadzone + settle after his "too sensitive".
+- [x] No key to copy: the Frame signs with its Vibepollo pairing key, the PC checks it against
+      Vibepollo's certificate; the PC finds the Frame by broadcast.
+- [x] New-user path: remote-display/README.md, `stream.sh setup`, `ftrd-host.ps1 -Install`, one
+      "Remote PC" menu entry.
 - Dropped on Curtis's call: taking the physical monitors off and the heartbeat fail-safe (he
   moves windows with Win+Shift+arrows instead).
 

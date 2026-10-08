@@ -15,15 +15,17 @@ Keeps the PC's display layout the way you want it while the Steam Frame shows vi
     30 s), with a Vibepollo API token in vibepollo.token.
 
 Usage (PowerShell 5.1, as the logged-in user; no admin needed):
-  ftrd-host.ps1 -Setup            make the link key and save the current physical layout as the baseline
-  ftrd-host.ps1 -SaveBaseline     save the current physical layout as the baseline
+  ftrd-host.ps1 -Install          save the current physical layout, run now and at every logon
+  ftrd-host.ps1 -Uninstall        stop it and remove it from logon
+  ftrd-host.ps1 -SaveBaseline     save the current physical layout as the one to keep
   ftrd-host.ps1 -Status           displays, baseline, the Frame's answer
   ftrd-host.ps1 -Restore          physical monitors back to the baseline now
   ftrd-host.ps1 -Run              the agent (Startup folder)
-Data folder: %LOCALAPPDATA%\ftrd (link.key, baseline.json, vibepollo.token (optional), ftrd-host.log).
+Data folder: %LOCALAPPDATA%\ftrd (ftrd-host.ps1, baseline.json, frame.txt, vibepollo.token (optional),
+ftrd-host.log). The Frame's answers are signed with its Vibepollo pairing key; nothing to copy.
 #>
-param([switch]$Setup, [switch]$SaveBaseline, [switch]$Status, [switch]$Restore, [switch]$Run,
-      [string[]]$Frame = @('10.35.78.1', '10.0.0.253'), [int]$Port = 47810,
+param([switch]$Install, [switch]$Uninstall, [switch]$SaveBaseline, [switch]$Status, [switch]$Restore, [switch]$Run,
+      [string[]]$Frame = @(), [int]$Port = 47810,
       [string]$VibepolloConfig = 'C:\Program Files\Sunshine\config')
 $ErrorActionPreference = 'Continue'
 $Data = Join-Path $env:LOCALAPPDATA 'ftrd'
@@ -160,22 +162,22 @@ function Physical-Matches($os) {
 # ---- which Windows display shows which Frame monitor --------------------------------------
 # The Frame sends its client certificate's SHA-256; Vibepollo's state file has each pairing's
 # certificate and id, and its log names the display it made for that id.
-$script:certMap = @{}; $script:certMapAt = Get-Date '2000-01-01'
-function Cert-Uuid($sha) {
-  if (((Get-Date) - $script:certMapAt).TotalSeconds -gt 60) {
-    $script:certMap = @{}; $script:certMapAt = Get-Date
-    try {
-      $st = Get-Content (Join-Path $VibepolloConfig 'sunshine_state.json') -Raw | ConvertFrom-Json
-      foreach ($d in $st.root.named_devices) {
-        $body = ($d.cert -split "`n" | Where-Object { $_ -and $_ -notmatch '-----' }) -join ''
-        $der = [Convert]::FromBase64String($body.Trim())
-        $h = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($der)).Replace('-', '').ToLower()
-        $script:certMap[$h] = $d.uuid
-      }
-    } catch { Log "can't read Vibepollo's pairings: $_" }
-  }
-  $script:certMap[$sha]
+$script:certMap = @{}; $script:certObj = @{}; $script:certMapAt = Get-Date '2000-01-01'
+function Load-Pairings {
+  if (((Get-Date) - $script:certMapAt).TotalSeconds -lt 60) { return }
+  $script:certMap = @{}; $script:certObj = @{}; $script:certMapAt = Get-Date
+  try {
+    $st = Get-Content (Join-Path $VibepolloConfig 'sunshine_state.json') -Raw | ConvertFrom-Json
+    foreach ($d in $st.root.named_devices) {
+      $body = ($d.cert -split "`n" | Where-Object { $_ -and $_ -notmatch '-----' }) -join ''
+      $der = [Convert]::FromBase64String($body.Trim())
+      $h = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($der)).Replace('-', '').ToLower()
+      $script:certMap[$h] = $d.uuid
+      $script:certObj[$h] = New-Object Security.Cryptography.X509Certificates.X509Certificate2 (, $der)
+    }
+  } catch { Log "can't read Vibepollo's pairings: $_" }
 }
+function Cert-Uuid($sha) { Load-Pairings; $script:certMap[$sha] }
 function Uuid-Display($uuid) {
   try {
     $logDir = Join-Path $VibepolloConfig 'logs'
@@ -287,40 +289,85 @@ function Terminate-Virtual {
 }
 
 # ---- the link ------------------------------------------------------------------------------
-function Get-Key { $f = Join-Path $Data 'link.key'; if (Test-Path $f) { [Text.Encoding]::ASCII.GetBytes((Get-Content $f -Raw).Trim()) } else { $null } }
-function Ask-Frame($key) {
+# Ask the Frame (ftrd-presence) what it shows. Its answer is signed with its Vibepollo pairing
+# key, checked against the certificate Vibepollo trusts. The Frame is found by broadcasting on
+# the PC's networks (every 10 s while unknown) and remembered (frame.txt); -Frame overrides.
+$FrameFile = Join-Path $Data 'frame.txt'
+$script:lastBroadcast = Get-Date '2000-01-01'
+function Broadcast-Targets {
+  try {
+    Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop | Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' -and $_.PrefixLength -lt 32 } | ForEach-Object {
+      $ip = [Net.IPAddress]::Parse($_.IPAddress).GetAddressBytes(); [Array]::Reverse($ip)
+      $n = [BitConverter]::ToUInt32($ip, 0); $mask = [uint32]([Math]::Pow(2, 32) - [Math]::Pow(2, 32 - $_.PrefixLength))
+      $bc = [BitConverter]::GetBytes([uint32](($n -band $mask) -bor (-bnot $mask -band 0xFFFFFFFF))); [Array]::Reverse($bc)
+      ([Net.IPAddress]$bc).ToString()
+    }
+  } catch { '255.255.255.255' }
+}
+function Ask-Frame {
   $nonce = New-Object byte[] 16; [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($nonce)
-  $hex = [BitConverter]::ToString($nonce).Replace('-', '').ToLower()
-  foreach ($addr in $Frame) {
-    $u = New-Object Net.Sockets.UdpClient
-    try {
-      $u.Client.ReceiveTimeout = 400
-      $msg = [Text.Encoding]::ASCII.GetBytes("FTRD1 PING $hex")
-      [void]$u.Send($msg, $msg.Length, $addr, $Port)
-      $ep = New-Object Net.IPEndPoint([Net.IPAddress]::Any, 0)
-      $reply = [Text.Encoding]::UTF8.GetString($u.Receive([ref]$ep))
-    } catch { continue } finally { $u.Close() }
-    $nl = $reply.LastIndexOf("`n")
-    if (-not $reply.StartsWith('FTRD1 ') -or $nl -lt 0) { continue }
-    $body = $reply.Substring(6, $nl - 6); $mac = $reply.Substring($nl + 1).Trim()
-    $h = New-Object Security.Cryptography.HMACSHA256 (, $key)
-    $want = [BitConverter]::ToString($h.ComputeHash([byte[]]($nonce + [Text.Encoding]::UTF8.GetBytes($body)))).Replace('-', '').ToLower()
-    if ($want -ne $mac) { Log "bad signature from $addr (key mismatch?)"; continue }
-    $j = $body | ConvertFrom-Json
-    return [pscustomobject]@{ From = $addr; Monitors = @($j.monitors) }
+  $msg = [Text.Encoding]::ASCII.GetBytes('FTRD2 PING ' + [BitConverter]::ToString($nonce).Replace('-', '').ToLower())
+  $targets = @($Frame)
+  if (-not $targets.Count) {
+    if (Test-Path $FrameFile) { $targets = @((Get-Content $FrameFile -Raw).Trim()) }
+    if (-not $targets.Count -or ((Get-Date) - $script:lastFound).TotalSeconds -gt 10) {
+      if (((Get-Date) - $script:lastBroadcast).TotalSeconds -ge 10) { $script:lastBroadcast = Get-Date; $targets += @(Broadcast-Targets) }
+    }
   }
+  if (-not $targets.Count) { return $null }
+  Load-Pairings
+  $u = New-Object Net.Sockets.UdpClient
+  try {
+    $u.EnableBroadcast = $true; $u.Client.ReceiveTimeout = 400
+    foreach ($t in $targets) { try { [void]$u.Send($msg, $msg.Length, $t, $Port) } catch {} }
+    $until = (Get-Date).AddMilliseconds(500)
+    while ((Get-Date) -lt $until) {
+      $ep = New-Object Net.IPEndPoint([Net.IPAddress]::Any, 0)
+      try { $reply = [Text.Encoding]::UTF8.GetString($u.Receive([ref]$ep)) } catch { break }
+      $nl = $reply.LastIndexOf("`n")
+      if (-not $reply.StartsWith('FTRD2 ') -or $nl -lt 0) { continue }
+      $body = $reply.Substring(6, $nl - 6); $tail = $reply.Substring($nl + 1).Trim().Split(' ')
+      if ($tail.Count -ne 2) { continue }
+      $cert = $script:certObj[$tail[0]]
+      if (-not $cert) { Log "answer from $($ep.Address) signed by a device Vibepollo hasn't paired; ignored"; continue }
+      $sig = New-Object byte[] ($tail[1].Length / 2)
+      for ($i = 0; $i -lt $sig.Length; $i++) { $sig[$i] = [Convert]::ToByte($tail[1].Substring(2 * $i, 2), 16) }
+      $ok = $false
+      try { $ok = $cert.PublicKey.Key.VerifyData([byte[]]($nonce + [Text.Encoding]::UTF8.GetBytes($body)), 'SHA256', $sig) } catch {}
+      if (-not $ok) { Log "bad signature from $($ep.Address); ignored"; continue }
+      $from = $ep.Address.ToString()
+      if (-not $Frame.Count -and (-not (Test-Path $FrameFile) -or (Get-Content $FrameFile -Raw).Trim() -ne $from)) {
+        Set-Content -Path $FrameFile -Value $from; Log "Frame found at $from"
+      }
+      $script:lastFound = Get-Date
+      $j = $body | ConvertFrom-Json
+      return [pscustomobject]@{ From = $from; Monitors = @($j.monitors) }
+    }
+  } finally { $u.Close() }
   $null
 }
+$script:lastFound = Get-Date '2000-01-01'
 
 # ---- commands ------------------------------------------------------------------------------
-if ($Setup) {
-  $kf = Join-Path $Data 'link.key'
-  if (-not (Test-Path $kf)) {
-    $k = New-Object byte[] 32; [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($k)
-    Set-Content -Path $kf -Value ([BitConverter]::ToString($k).Replace('-', '').ToLower()) -NoNewline
-    Log "link key made: $kf (copy it to the Frame: ~/.config/frametop-remote-display/link.key)"
-  } else { Log "link key exists: $kf" }
+if ($Install) {
+  # Copy to the data folder, save the layout, start at logon (Startup folder), start now.
+  $dest = Join-Path $Data 'ftrd-host.ps1'
+  if ($MyInvocation.MyCommand.Path -ne $dest) { Copy-Item -Force $MyInvocation.MyCommand.Path $dest }
+  if (-not (Test-Path (Join-Path $VibepolloConfig 'sunshine_state.json'))) { Log "warning: no Vibepollo at $VibepolloConfig (install it first, or pass -VibepolloConfig)" }
   Save-Baseline
+  $ps = "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe"
+  $sc = (New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path ([Environment]::GetFolderPath('Startup')) 'ftrd-host.lnk'))
+  $sc.TargetPath = $ps; $sc.WindowStyle = 7; $sc.Description = 'Frametop remote display: keeps the PC display layout'
+  $sc.Arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$dest`" -Run"
+  $sc.Save()
+  Start-Process -WindowStyle Hidden -FilePath $ps -ArgumentList @('-NoProfile', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', $dest, '-Run')
+  Log "installed: $dest, started now and at every logon"
+  exit 0
+}
+if ($Uninstall) {
+  Remove-Item (Join-Path ([Environment]::GetFolderPath('Startup')) 'ftrd-host.lnk') -ErrorAction SilentlyContinue
+  Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -ne $PID -and $_.Name -eq 'powershell.exe' -and $_.CommandLine -like '*ftrd-host.ps1*-Run*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+  Log "uninstalled (agent stopped, Startup entry removed; $Data left in place)"
   exit 0
 }
 if ($SaveBaseline) { Save-Baseline; exit 0 }
@@ -328,8 +375,9 @@ if ($Restore) { Restore-Physical 'restore (manual)' $null; exit 0 }
 if ($Status) {
   "displays: " + (Describe (Outputs))
   $b = Get-Baseline; "baseline: " + $(if ($b) { ($b | ForEach-Object { '{0}x{1}@{2} at {3},{4}{5}' -f $_.W, $_.H, $_.Hz, $_.X, $_.Y, $(if ($_.Primary) { ' P' } else { '' }) }) -join '; ' } else { 'none' })
-  $key = Get-Key; if (-not $key) { "no link key (run -Setup)"; exit 0 }
-  $a = Ask-Frame $key; if ($a) { "Frame ($($a.From)): " + (ConvertTo-Json -InputObject $a.Monitors -Depth 3 -Compress) } else { "Frame: no answer (no monitor open there, or asleep)" }
+  "agent: " + $(if (Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'powershell.exe' -and $_.CommandLine -like '*ftrd-host.ps1*-Run*' }) { 'running' } else { 'not running' })
+  $script:lastBroadcast = Get-Date '2000-01-01'; $script:lastFound = Get-Date '2000-01-01'
+  $a = Ask-Frame; if ($a) { "Frame ($($a.From)): " + (ConvertTo-Json -InputObject $a.Monitors -Depth 3 -Compress) } else { "Frame: no answer (it answers only while Remote PC is open)" }
   exit 0
 }
 if (-not $Run) { Get-Help $MyInvocation.MyCommand.Path; exit 0 }
@@ -337,9 +385,8 @@ if (-not $Run) { Get-Help $MyInvocation.MyCommand.Path; exit 0 }
 # ---- the agent -------------------------------------------------------------------------------
 Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -ne $PID -and $_.Name -eq 'powershell.exe' -and $_.CommandLine -like '*ftrd-host.ps1*-Run*' } |
   ForEach-Object { Log "stopping an older agent ($($_.ProcessId))"; Stop-Process -Id $_.ProcessId -Force }
-$key = Get-Key
-if (-not $key) { Log 'no link key: run ftrd-host.ps1 -Setup (only the physical layout is kept until then)' }
-Log ("agent running; frame " + ($Frame -join ',') + " port $Port")
+if (-not (Get-Baseline)) { Save-Baseline }
+Log ("agent running; Frame " + $(if ($Frame.Count) { $Frame -join ',' } else { 'found by broadcast' }) + ", port $Port")
 $mons = @(); $known = $false        # last answer's monitors; whether we've had one
 $accepted = ''; $cand = ''; $candSince = Get-Date
 $busyUntil = Get-Date '2000-01-01'; $lastFix = Get-Date '2000-01-01'
@@ -347,8 +394,8 @@ $seen = ''; $since = Get-Date; $noneSince = $null; $orphanDone = $false
 while ($true) {
   Start-Sleep -Milliseconds 1000
   $now = Get-Date
-  if ($key) {
-    $a = Ask-Frame $key
+  if ($true) {
+    $a = Ask-Frame
     if ($a) {
       $mons = @($a.Monitors); $known = $true
       if ($mons | Where-Object { $_.busy }) { $busyUntil = $now.AddSeconds(6) }  # a monitor is (re)starting

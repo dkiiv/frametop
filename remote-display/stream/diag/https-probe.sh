@@ -13,10 +13,10 @@ probe() {
       "https://$H:47984/serverinfo?uniqueid=$(cat "$K2/uniqueid.dat")")
   printf "%s https %s %.2fs\n" "$(date +%T)" "$c" "$(echo "$(date +%s.%N) - $s" | bc)"
 }
-for k in "" "--keys $K2"; do ./build/ftrd-stream $k --novr --app-id 2147483502 --seconds 1 >/dev/null 2>&1; done
+for k in "" "--keys $K2"; do ../build/ftrd-stream $k --novr --app-id 2147483502 --seconds 1 >/dev/null 2>&1; done
 sleep 3
 echo "-- idle"; probe; probe
-./build/ftrd-stream --novr --app "${A1:-Remote Monitor}" --size ${S1:-2560x1440} --fps 90 --seconds ${T1:-40} > /tmp/hp1.log 2>&1 &
+../build/ftrd-stream --novr --app "${A1:-Remote Monitor}" --size ${S1:-2560x1440} --fps 90 --seconds ${T1:-40} > /tmp/hp1.log 2>&1 &
 pid=$!
 t0=$(date +%s)
 while kill -0 $pid 2>/dev/null; do

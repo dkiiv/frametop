@@ -6,20 +6,21 @@ Frame shows: one entry per virtual monitor, with the stream size and where its p
 around you, so the agent can arrange Windows' virtual monitors the same way (right of the
 physical ones). With no instance left it answers "no monitors" for a few seconds and exits.
 
-  Request  (PC -> Frame, UDP 47810):  FTRD1 PING <nonce hex>
-  Reply    (Frame -> PC):             FTRD1 <json>\\n<hex HMAC-SHA256(key, nonce + json)>
-The key is ~/.config/frametop-remote-display/link.key (the PC agent makes it; copied here
-once). Replies without a valid key are never sent.
+  Request  (PC -> Frame, UDP 47810):  FTRD2 PING <nonce hex>
+  Reply    (Frame -> PC):             FTRD2 <json>\\n<cert sha256 hex> <signature hex>
+The signature is RSA-SHA256 over nonce + json with this Frame's Vibepollo pairing key (identity
+1's key.pem), so the PC agent checks it against the certificate Vibepollo already trusts: no
+extra key to copy.
 
 State comes from the instances' FTRD_STATE_FILEs (~/.cache/frametop-remote-display/
 stream-N.state, written by ftrd-stream), panel poses from ft-screens (@ft_screens "get N",
 "head") and which panel holds which window from ft-floatd (@frametop_float "list apps").
 """
-import base64, hashlib, hmac, json, math, os, socket, sys, time
+import base64, hashlib, json, math, os, socket, subprocess, sys, time
 
 PORT = int(os.environ.get("FTRD_PRESENCE_PORT", "47810"))
 CACHE = os.path.expanduser("~/.cache/frametop-remote-display")
-KEYFILE = os.path.expanduser("~/.config/frametop-remote-display/link.key")
+KEYDIR = os.path.expanduser("~/.config/frametop-remote-display")
 LINGER = 8.0  # seconds of "no monitors" answers after the last instance stops
 
 
@@ -122,13 +123,16 @@ def snapshot():
     return mons
 
 
+def sign(data):
+    r = subprocess.run(["openssl", "dgst", "-sha256", "-sign", os.path.join(KEYDIR, "key.pem")],
+                       input=data, capture_output=True, timeout=5)
+    return r.stdout.hex() if r.returncode == 0 else ""
+
+
 def main():
-    try:
-        key = open(KEYFILE, "rb").read().strip()
-    except OSError:
-        sys.exit(f"ftrd-presence: no key at {KEYFILE} (see remote-display/host/README.md)")
-    if len(key) < 32:
-        sys.exit("ftrd-presence: key too short")
+    cert = cert_sha256(KEYDIR)
+    if not cert or not os.path.exists(os.path.join(KEYDIR, "key.pem")):
+        sys.exit(f"ftrd-presence: no paired identity in {KEYDIR} (stream.sh setup)")
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
@@ -153,7 +157,7 @@ def main():
         except socket.timeout:
             continue
         parts = data.decode(errors="replace").split()
-        if len(parts) != 3 or parts[0] != "FTRD1" or parts[1] != "PING":
+        if len(parts) != 3 or parts[0] != "FTRD2" or parts[1] != "PING":
             continue
         try:
             nonce = bytes.fromhex(parts[2])
@@ -161,9 +165,10 @@ def main():
             continue
         if not 8 <= len(nonce) <= 64:
             continue
-        body = json.dumps({"v": 1, "t": time.time(), "monitors": cache}, separators=(",", ":"))
-        mac = hmac.new(key, nonce + body.encode(), hashlib.sha256).hexdigest()
-        s.sendto(f"FTRD1 {body}\n{mac}".encode(), peer)
+        body = json.dumps({"v": 2, "t": time.time(), "monitors": cache}, separators=(",", ":"))
+        sig = sign(nonce + body.encode())
+        if sig:
+            s.sendto(f"FTRD2 {body}\n{cert} {sig}".encode(), peer)
 
 
 if __name__ == "__main__":
