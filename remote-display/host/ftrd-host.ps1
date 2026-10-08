@@ -36,11 +36,29 @@ answers are signed with its Vibepollo pairing key; nothing to copy.
 #>
 param([switch]$Install, [switch]$AllowPairing, [switch]$ShowLogin, [switch]$Uninstall, [switch]$RemoveVibepollo, [switch]$SaveBaseline, [switch]$Status, [switch]$Restore, [switch]$Run,
       [string[]]$Frame = @(), [int]$Port = 47810,
-      [string]$VibepolloConfig = 'C:\Program Files\Sunshine\config')
+      [string]$VibepolloConfig = '')
 $ErrorActionPreference = 'Continue'
 $Data = Join-Path $env:LOCALAPPDATA 'ftrd'
 New-Item -ItemType Directory -Force -Path $Data | Out-Null
 $LogFile = Join-Path $Data 'ftrd-host.log'
+# Where Vibepollo lives: a fresh install goes to Program Files\Apollo, one over Sunshine stays in
+# Program Files\Sunshine. From its uninstall entry, else its service.
+function Vibepollo-Dir {
+  $keys = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*', 'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+  foreach ($e in Get-ItemProperty $keys -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -eq 'Vibepollo' -and $_.InstallLocation }) {
+    if (Test-Path (Join-Path $e.InstallLocation 'sunshine.exe')) { return $e.InstallLocation.TrimEnd('\') }
+  }
+  $img = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\ApolloService' -ErrorAction SilentlyContinue).ImagePath
+  if ($img) {
+    $exe = ($img -replace '^"([^"]+)".*', '$1') -replace '^(\S+\.exe).*', '$1'
+    $d = Split-Path $exe
+    if (Test-Path (Join-Path $d 'sunshine.exe')) { return $d }
+    if (Test-Path (Join-Path (Split-Path $d) 'sunshine.exe')) { return (Split-Path $d) }
+  }
+  foreach ($d in 'C:\Program Files\Apollo', 'C:\Program Files\Sunshine') { if (Test-Path (Join-Path $d 'sunshine.exe')) { return $d } }
+  $null
+}
+if (-not $VibepolloConfig) { $vd = Vibepollo-Dir; $VibepolloConfig = if ($vd) { Join-Path $vd 'config' } else { 'C:\Program Files\Apollo\config' } }
 function Log($m) {
   $line = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + ' ' + $m
   Add-Content -Path $LogFile -Value $line
@@ -486,17 +504,37 @@ if ($Install) {
     $pass = -join ($bytes | ForEach-Object { $chars[$_ % $chars.Length] })
     $fresh = $false
     try { $r = Vp Post '/api/password' @{ newUsername = $user; newPassword = $pass; confirmNewPassword = $pass } $null; $fresh = [bool]$r.status } catch {}
+    $basic = $null
+    if (-not $fresh) {
+      Write-Host "Vibepollo already has a login. Enter it once (so this helper can make its own API token),"
+      Write-Host "or press Cancel if you don't know it: then it's reset to a new one (one more Windows prompt)."
+      $cred = $null
+      try { $cred = Get-Credential -Message 'Your Vibepollo web page login (https://localhost:47990), or Cancel to reset it' } catch {}
+      if ($cred) {
+        $basic = 'Basic ' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("$($cred.UserName):$($cred.GetNetworkCredential().Password)"))
+        try { [void](Vp Get '/api/clients/list' $null $basic) } catch { Write-Host "That login didn't work; resetting it instead."; $basic = $null }
+      }
+      if (-not $basic) {
+        $vd = Vibepollo-Dir
+        if (-not $vd) { throw "can't find Vibepollo's folder to reset its login" }
+        $reset = Join-Path $env:TEMP 'ftrd-reset-login.ps1'
+        Set-Content $reset ("Stop-Service ApolloService -Force`n" +
+          "Start-Process -Wait -WorkingDirectory '$vd' -FilePath '$vd\sunshine.exe' -ArgumentList '--creds', '$user', '$pass'`n" +
+          "Start-Service ApolloService")
+        Write-Host "resetting Vibepollo's login: click Yes in the Windows prompt..."
+        [void](Start-Process powershell.exe -Verb RunAs -Wait -PassThru -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $reset)
+        Remove-Item $reset -ErrorAction SilentlyContinue
+        $up = $false
+        for ($i = 0; $i -lt 30 -and -not $up; $i++) { try { [void](Invoke-WebRequest -UseBasicParsing -TimeoutSec 3 'http://localhost:47989/serverinfo'); $up = $true } catch { Start-Sleep 2 } }
+        $fresh = $true
+      }
+    }
     if ($fresh) {
       Save-Secret 'vibepollo-login.dpapi' "$user`n$pass"
-      Write-Host "made the login for Vibepollo's web page (you rarely need it): user $user, password $pass"
-      Write-Host "(ftrd-host.ps1 -ShowLogin shows it again)"
-    } else {
-      Write-Host "Vibepollo already has a login: enter it once, so this helper can make its own API token."
-      $cred = Get-Credential -Message 'Your Vibepollo web page login (https://localhost:47990)'
-      if (-not $cred) { throw 'no login given' }
-      $user = $cred.UserName; $pass = $cred.GetNetworkCredential().Password
+      Write-Host "Vibepollo's web page login (you rarely need it): user $user, password $pass"
+      Write-Host "(-ShowLogin shows it again)"
+      $basic = 'Basic ' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("$user`:$pass"))
     }
-    $basic = 'Basic ' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("$user`:$pass"))
     $scopes = @(@{ path = '/api/pin'; methods = @('POST') }, @{ path = '/api/clients/list'; methods = @('GET') },
                 @{ path = '/api/clients/update'; methods = @('POST') }, @{ path = '/api/display/terminate_virtual'; methods = @('POST') })
     $t = Vp Post '/api/token' @{ scopes = $scopes } $basic
@@ -540,13 +578,15 @@ foreach ($e in Get-ItemProperty $keys -ErrorAction SilentlyContinue | Where-Obje
   $code = [regex]::Match($e.UninstallString, '\{[0-9A-Fa-f-]+\}').Value
   if ($code) { Start-Process msiexec.exe -ArgumentList '/x', $code, '/qn', '/norestart' -Wait }
 }
-if (Test-Path 'C:\Program Files\Sunshine\uninstall.exe') { Start-Process 'C:\Program Files\Sunshine\uninstall.exe' -ArgumentList '/S', '_?=C:\Program Files\Sunshine' -Wait }
+foreach ($d in 'C:\Program Files\Apollo', 'C:\Program Files\Sunshine') {
+  if (Test-Path "$d\uninstall.exe") { Start-Process "$d\uninstall.exe" -ArgumentList '/S', "_?=$d" -Wait }
+}
 foreach ($d in Get-PnpDevice -Class Display -ErrorAction SilentlyContinue | Where-Object { $_.FriendlyName -match 'SudoMaker|Sunshine Virtual' }) {
   $inf = (Get-PnpDeviceProperty -InstanceId $d.InstanceId -KeyName DEVPKEY_Device_DriverInfPath -ErrorAction SilentlyContinue).Data
   & pnputil /remove-device "$($d.InstanceId)" | Out-Null
   if ($inf -like 'oem*.inf') { & pnputil /delete-driver $inf /uninstall /force | Out-Null }
 }
-Remove-Item -Recurse -Force 'C:\Program Files\Sunshine' -ErrorAction SilentlyContinue
+Remove-Item -Recurse -Force 'C:\Program Files\Apollo', 'C:\Program Files\Sunshine' -ErrorAction SilentlyContinue
 '@
     Write-Host 'Removing Vibepollo: click Yes in the Windows prompt...'
     $pr = Start-Process powershell.exe -Verb RunAs -Wait -PassThru -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $script
