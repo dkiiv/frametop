@@ -113,36 +113,25 @@ case ${1:-status} in
       sleep 3
     done ;;
   install-desktop)  # ~/.local/share/applications
+    # One entry in the menus: "Remote PC" (every paired monitor, each in its own panel). The
+    # per-monitor and PC-desktop files stay, hidden (NoDisplay), because ft-float launch floats
+    # a window by its desktop file.
     apps=$HOME/.local/share/applications
     mkdir -p "$apps"
-    cp "$here/org.frametop.RemoteDisplay.desktop" "$apps/"
-    # One entry per paired identity (keys with a uniqueid); stale ones are removed.
-    rm -f "$apps"/org.frametop.RemoteMonitor*.desktop
+    rm -f "$apps"/org.frametop.RemoteMonitor*.desktop "$apps"/org.frametop.RemoteDisplay.desktop
+    hidden() {  # name id command
+      printf '[Desktop Entry]\nType=Application\nName=%s\nExec=sh -c "%s"\nIcon=preferences-desktop-remote-desktop\nTerminal=false\nStartupWMClass=%s\nNoDisplay=true\n' \
+        "$1" "$3" "$2" > "$apps/$2.desktop"
+    }
+    s='$HOME/dev/frametop/remote-display/stream/stream.sh'
+    hidden "Remote PC desktop" org.frametop.RemoteDisplay "$s on -i desktop --window"
     for n in 1 2 3 4; do
       [ -f "$(keys "$n")/uniqueid.dat" ] || continue
-      cat > "$apps/org.frametop.RemoteMonitor$n.desktop" <<EOF
-[Desktop Entry]
-Type=Application
-Name=Remote PC monitor $n (POC)
-Comment=Frametop remote-display POC: a virtual monitor on the Windows PC (Vibepollo Remote Monitor), floating
-Exec=sh -c "\$HOME/dev/frametop/remote-display/stream/stream.sh on -i $n --window --app 'Remote Monitor' --size 2560x1440 --wl-id org.frametop.RemoteMonitor$n --title 'Remote PC $n'"
-Icon=preferences-desktop-remote-desktop
-Terminal=false
-Categories=Network;RemoteAccess;
-StartupWMClass=org.frametop.RemoteMonitor$n
-EOF
+      hidden "Remote PC $n" "org.frametop.RemoteMonitor$n" \
+        "$s on -i $n --window --app 'Remote Monitor' --size 2560x1440 --wl-id org.frametop.RemoteMonitor$n --title 'Remote PC $n'"
     done
-    cat > "$apps/org.frametop.RemotePC.desktop" <<EOF
-[Desktop Entry]
-Type=Application
-Name=Remote PC (all monitors)
-Comment=Frametop remote-display POC: every paired virtual monitor on the Windows PC, each in its own panel
-Exec=sh -c "\$HOME/dev/frametop/remote-display/stream/stream.sh float-all"
-Icon=preferences-desktop-remote-desktop
-Terminal=false
-Categories=Network;RemoteAccess;
-NoDisplay=false
-EOF
-    echo "installed: $(cd "$apps" && ls org.frametop.Remote*.desktop | tr '\n' ' ')" ;;
+    printf '[Desktop Entry]\nType=Application\nName=Remote PC\nComment=Your Windows PC'"'"'s virtual monitors, each in its own panel\nExec=sh -c "%s float-all"\nIcon=preferences-desktop-remote-desktop\nTerminal=false\nCategories=Network;RemoteAccess;\n' \
+      "$s" > "$apps/org.frametop.RemotePC.desktop"
+    echo "shown: Remote PC; hidden: $(cd "$apps" && grep -l NoDisplay=true org.frametop.Remote*.desktop | tr '\n' ' ')" ;;
   *) echo "usage: stream.sh on [-i N] [opts]|off [N|all]|status|log [N]|pair [-i N] PIN|float [N]|float-all|float-desktop|cleanup|install-desktop"; exit 2 ;;
 esac
