@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """ftrd-presence: the Frame's half of the PC link (remote-display/host/README.md).
 
-While at least one remote-display instance runs, answer the PC agent's pings with what the
+While at least one remote-display instance runs, answer the PC agent's queries with what the
 Frame shows: one entry per virtual monitor, with the stream size and where its panel floats
-around you, so the agent can arrange Windows' monitors the same way. With no instance left it
-answers "no monitors" for a few seconds and exits; no answer at all means the Frame is gone
-(asleep, crashed, out of range), and the PC agent gives the PC its own screens back.
+around you, so the agent can arrange Windows' virtual monitors the same way (right of the
+physical ones). With no instance left it answers "no monitors" for a few seconds and exits.
 
   Request  (PC -> Frame, UDP 47810):  FTRD1 PING <nonce hex>
   Reply    (Frame -> PC):             FTRD1 <json>\\n<hex HMAC-SHA256(key, nonce + json)>

@@ -112,14 +112,14 @@ Desktop Streamer uses it).
 
 ## M6 — PC link (Curtis, 2026-10-07)
 
-- [x] Heartbeat: the PC agent pings the Frame; the Frame answers only while a virtual monitor is
-      open (signed). remote-display/host/README.md.
-- [x] Virtual monitors arranged in Windows as the panels sit around you (observe mode tested).
-- [ ] Control mode: physical monitors off while the Frame shows monitors (coded; first test
-      together with Curtis at the PC).
-- [ ] Fail-safe tested in control mode: Frame off / crash / out of range -> physical back in ~6 s.
-- [ ] Panel poses live (needs ft-floatd with `list apps`, i.e. a desktop restart).
-- [ ] Optional Vibepollo API token so a vanished Frame's virtual monitors are removed too.
+- [x] The Frame tells the PC how its virtual monitors are arranged (signed answers);
+      remote-display/host/README.md.
+- [x] Virtual monitors held right of the physical ones, in the Frame's order (tested: one moved
+      left of the ultrawide was put back in ~12 s, in Frame order).
+- [ ] Panel poses live (needs ft-floatd with `list apps`, i.e. a Frametop desktop restart), then
+      a worn test: swap the panels, check Windows swaps the monitors.
+- Dropped on Curtis's call: taking the physical monitors off and the heartbeat fail-safe (he
+  moves windows with Win+Shift+arrows instead).
 
 ## Backlog / nice-to-haves
 

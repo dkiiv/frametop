@@ -12,7 +12,7 @@
 #   stream.sh float-all                         every paired identity's monitor (the "Remote PC" entry)
 #   stream.sh float-desktop                     the PC's own desktop (its physical monitors), floating
 #   stream.sh cleanup                           clear virtual monitors Vibepollo kept after release
-#   stream.sh presence                          the PC link's state (what the PC agent gets)
+#   stream.sh presence                          what the PC agent gets (monitor arrangement)
 #   stream.sh install-desktop                   the desktop files ft-float launch needs
 # Identity N: keys in ~/.config/frametop-remote-display (N=1) or .../N. Vibepollo gives each paired
 # identity one virtual monitor. Instance "desktop" (float-desktop) uses identity 1.

@@ -1,40 +1,34 @@
 <#
 ftrd-host.ps1: the PC's half of the Frame link (see README.md next to it).
 
-While the Steam Frame shows virtual monitors (Vibepollo "Remote Monitor" streams), it answers
-this agent's pings (ftrd-presence on the Frame) with where each monitor's panel floats. The agent:
-  - arranges Windows' virtual monitors the way the panels sit around you (left of / right of /
-    above each other), so dragging windows between them works as it looks;
-  - in control mode, also takes the physical monitors off the desktop, so every window lives on
-    a monitor you can see from the Frame;
-  - gives the PC its own monitors back (the saved baseline layout) as soon as the Frame stops
-    answering (TimeoutSeconds) or reports no monitors, and also when this agent dies while the
-    physical monitors are off (a guard process watches it);
-  - otherwise keeps the physical layout at the baseline (Vibepollo 2.0.0 doesn't restore it).
+Keeps the PC's display layout the way you want it while the Steam Frame shows virtual monitors
+(Vibepollo "Remote Monitor" streams):
+  - the physical monitors stay on, at the saved baseline layout (Vibepollo 2.0.0 shuffles them
+    on every virtual monitor start/stop);
+  - the virtual monitors always sit right of the physical ones, arranged the way their panels
+    sit around you in the Frame (left of / right of / above each other), so dragging windows
+    between them works as it looks. The panel positions come from ftrd-presence on the Frame
+    (the agent asks every 2 s; no answer just means "keep the last arrangement").
 
 Usage (PowerShell 5.1, as the logged-in user; no admin needed):
   ftrd-host.ps1 -Setup            make the link key and save the current physical layout as the baseline
   ftrd-host.ps1 -SaveBaseline     save the current physical layout as the baseline
-  ftrd-host.ps1 -Status           displays, baseline, Frame answer, mode
+  ftrd-host.ps1 -Status           displays, baseline, the Frame's answer
   ftrd-host.ps1 -Restore          physical monitors back to the baseline now
-  ftrd-host.ps1 -Run [-Control]   the agent (Startup folder); -Control (or the file control.on in
-                                  the data folder) turns on taking the physical monitors off
-Data folder: %LOCALAPPDATA%\ftrd (link.key, baseline.json, control.on, vibepollo.token (optional),
-ftrd-host.log).
-Emergency: Win+P -> Extend brings the physical monitors back whatever this agent does.
+  ftrd-host.ps1 -Run              the agent (Startup folder)
+Data folder: %LOCALAPPDATA%\ftrd (link.key, baseline.json, ftrd-host.log).
 #>
-param([switch]$Setup, [switch]$SaveBaseline, [switch]$Status, [switch]$Restore, [switch]$Run, [switch]$Control,
-      [int]$Guard = 0, [string[]]$Frame = @('10.35.78.1', '10.0.0.253'), [int]$Port = 47810,
-      [double]$TimeoutSeconds = 5, [string]$VibepolloConfig = 'C:\Program Files\Sunshine\config')
+param([switch]$Setup, [switch]$SaveBaseline, [switch]$Status, [switch]$Restore, [switch]$Run,
+      [string[]]$Frame = @('10.35.78.1', '10.0.0.253'), [int]$Port = 47810,
+      [string]$VibepolloConfig = 'C:\Program Files\Sunshine\config')
 $ErrorActionPreference = 'Continue'
 $Data = Join-Path $env:LOCALAPPDATA 'ftrd'
 New-Item -ItemType Directory -Force -Path $Data | Out-Null
 $LogFile = Join-Path $Data 'ftrd-host.log'
-$ArmedFile = Join-Path $Data 'armed'
 function Log($m) {
   $line = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + ' ' + $m
   Add-Content -Path $LogFile -Value $line
-  if (-not $Run -and -not $Guard) { Write-Output $line }
+  if (-not $Run) { Write-Output $line }
 }
 
 Add-Type @'
@@ -93,7 +87,7 @@ function Describe($os) {
   }) -join '; '
 }
 
-# ---- baseline (the physical layout to give back) ------------------------------------------
+# ---- baseline (the physical layout to keep) ------------------------------------------
 $BaselineFile = Join-Path $Data 'baseline.json'
 function Get-Baseline { if (Test-Path $BaselineFile) { Get-Content $BaselineFile -Raw | ConvertFrom-Json } else { $null } }
 function Save-Baseline {
@@ -192,12 +186,14 @@ function Uuid-Display($uuid) {
   $null
 }
 
-# Where each Frame monitor goes: columns left to right by azimuth (panels within 12 degrees of
-# each other stack, the higher one on top), top-aligned; the panel nearest straight ahead is
-# the primary candidate. Returns entries for Apply-Batch, positions relative to the group.
-function Plan-Virtual($mons, $os, $originX, $makePrimary) {
+# Where the virtual monitors go: right of the physical ones (from $originX, top-aligned at 0).
+# Frame monitors become columns left to right by panel azimuth (panels within 12 degrees of each
+# other stack, the higher one on top); virtual displays the Frame didn't name (no answer yet, an
+# older Frame side) follow in a row, in their current left-to-right order.
+function Plan-Virtual($mons, $os, $originX) {
   $items = @()
   $virt = @($os | Where-Object { $_.Attached -and $_.Virtual })
+  if (-not $virt) { return @() }
   $i = 0
   foreach ($m in $mons) {
     $name = $null
@@ -205,52 +201,38 @@ function Plan-Virtual($mons, $os, $originX, $makePrimary) {
     if ($uuid) { $name = Uuid-Display $uuid }
     $o = if ($name) { $virt | Where-Object { $_.Name -eq $name } | Select-Object -First 1 } else { $null }
     if (-not $o) { $o = $virt | Where-Object { $_.W -eq $m.w -and $_.H -eq $m.h -and $items.Name -notcontains $_.Name } | Select-Object -First 1 }
-    if (-not $o) { continue }
+    if (-not $o -or $items.Name -contains $o.Name) { continue }
     # No panel pose (ft-floatd without "list apps"): a row, in instance order.
     $az = if ($null -ne $m.az) { [double]$m.az } else { 1000 + 100 * $i }; $el = if ($null -ne $m.el) { [double]$m.el } else { 0 }
     $items += [pscustomobject]@{ Name = $o.Name; W = $o.W; H = $o.H; Az = $az; El = $el }
     $i++
   }
-  if (-not $items) { return @() }
+  foreach ($o in ($virt | Sort-Object X, Y)) {
+    if ($items.Name -contains $o.Name) { continue }
+    $items += [pscustomobject]@{ Name = $o.Name; W = $o.W; H = $o.H; Az = 5000 + 100 * $i; El = 0 }
+    $i++
+  }
   $cols = @(); $cur = $null
   foreach ($it in ($items | Sort-Object Az)) {
     if ($cur -and [Math]::Abs($it.Az - $cur.Az) -lt 12) { $cur.Items += $it } else { $cur = [pscustomobject]@{ Az = $it.Az; Items = @($it) }; $cols += $cur }
   }
-  $plan = @(); $x = 0
+  $plan = @(); $x = $originX
   foreach ($c in $cols) {
     $y = 0; $cw = 0
     foreach ($it in ($c.Items | Sort-Object El -Descending)) {
-      $plan += [pscustomobject]@{ Name = $it.Name; X = $x; Y = $y; W = $it.W; H = $it.H; Az = $it.Az }
+      $plan += @{ Name = $it.Name; Fields = $DM_POSITION; X = $x; Y = $y; Primary = $false }
       $y += $it.H; $cw = [Math]::Max($cw, $it.W)
     }
     $x += $cw
   }
-  $front = ($plan | Sort-Object { [Math]::Abs($_.Az) } | Select-Object -First 1).Name
-  $dx = $originX; $dy = 0
-  if ($makePrimary) { $p = $plan | Where-Object Name -eq $front; $dx = -$p.X; $dy = -$p.Y }
-  @($plan | ForEach-Object { @{ Name = $_.Name; Fields = $DM_POSITION; X = $_.X + $dx; Y = $_.Y + $dy; Primary = ($makePrimary -and $_.Name -eq $front) } })
+  $plan
 }
 function Plan-Matches($plan, $os) {
   foreach ($e in $plan) {
     $o = $os | Where-Object Name -eq $e.Name
-    if (-not $o -or -not $o.Attached -or $o.X -ne $e.X -or $o.Y -ne $e.Y -or ($e.Primary -and -not $o.Primary)) { return $false }
+    if (-not $o -or -not $o.Attached -or $o.X -ne $e.X -or $o.Y -ne $e.Y) { return $false }
   }
   return $true
-}
-
-# The Frame is gone: ask Vibepollo to remove its virtual monitors too (the streams died with
-# the Frame; otherwise it keeps them). Needs an API token in vibepollo.token (web UI: API
-# tokens; scope POST /api/display/terminate_virtual is enough). Without one, they stay.
-function Terminate-Virtual {
-  $tf = Join-Path $Data 'vibepollo.token'
-  if (-not (Test-Path $tf)) { Log 'no vibepollo.token: virtual monitors left to Vibepollo'; return }
-  try {
-    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    [Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }  # localhost, self-signed
-    $r = Invoke-RestMethod -Method Post -Uri 'https://localhost:47990/api/display/terminate_virtual' -ContentType 'application/json' `
-      -Body '{}' -Headers @{ Authorization = 'Bearer ' + (Get-Content $tf -Raw).Trim() } -TimeoutSec 20
-    Log ('Vibepollo terminate_virtual: ' + (ConvertTo-Json -InputObject $r -Compress))
-  } catch { Log "Vibepollo terminate_virtual failed: $_" }
 }
 
 # ---- the link ------------------------------------------------------------------------------
@@ -291,79 +273,45 @@ if ($Setup) {
   exit 0
 }
 if ($SaveBaseline) { Save-Baseline; exit 0 }
-if ($Restore) { Restore-Physical 'restore (manual)' $null; Remove-Item $ArmedFile -ErrorAction SilentlyContinue; exit 0 }
+if ($Restore) { Restore-Physical 'restore (manual)' $null; exit 0 }
 if ($Status) {
   "displays: " + (Describe (Outputs))
   $b = Get-Baseline; "baseline: " + $(if ($b) { ($b | ForEach-Object { '{0}x{1}@{2} at {3},{4}{5}' -f $_.W, $_.H, $_.Hz, $_.X, $_.Y, $(if ($_.Primary) { ' P' } else { '' }) }) -join '; ' } else { 'none' })
-  "control mode: " + ($Control -or (Test-Path (Join-Path $Data 'control.on'))); "armed (physical off): " + (Test-Path $ArmedFile)
   $key = Get-Key; if (-not $key) { "no link key (run -Setup)"; exit 0 }
-  $a = Ask-Frame $key; if ($a) { "Frame ($($a.From)): " + (ConvertTo-Json -InputObject $a.Monitors -Depth 3 -Compress) } else { "Frame: no answer" }
+  $a = Ask-Frame $key; if ($a) { "Frame ($($a.From)): " + (ConvertTo-Json -InputObject $a.Monitors -Depth 3 -Compress) } else { "Frame: no answer (no monitor open there, or asleep)" }
   exit 0
-}
-if ($Guard) {
-  # Watches the agent; if it dies while the physical monitors are off, gives them back.
-  while ($true) {
-    Start-Sleep -Seconds 1
-    if (-not (Get-Process -Id $Guard -ErrorAction SilentlyContinue)) {
-      if (Test-Path $ArmedFile) { Log 'guard: the agent died with the physical monitors off'; Restore-Physical 'restore (guard)' $null; Remove-Item $ArmedFile -ErrorAction SilentlyContinue }
-      exit 0
-    }
-  }
 }
 if (-not $Run) { Get-Help $MyInvocation.MyCommand.Path; exit 0 }
 
 # ---- the agent -------------------------------------------------------------------------------
-$me = (Get-Process -Id $PID)
 Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -ne $PID -and $_.Name -eq 'powershell.exe' -and $_.CommandLine -like '*ftrd-host.ps1*-Run*' } |
   ForEach-Object { Log "stopping an older agent ($($_.ProcessId))"; Stop-Process -Id $_.ProcessId -Force }
-Start-Process -WindowStyle Hidden -FilePath "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $MyInvocation.MyCommand.Path, '-Guard', $PID)
 $key = Get-Key
-if (-not $key) { Log 'no link key: run ftrd-host.ps1 -Setup'; }
-if (Test-Path $ArmedFile) { Log 'armed at start (a previous run died?): restoring'; Restore-Physical 'restore (startup)' $null; Remove-Item $ArmedFile -ErrorAction SilentlyContinue }
-Log ("agent running; frame " + ($Frame -join ',') + " port $Port; timeout $TimeoutSeconds s")
-$lastAnswer = Get-Date '2000-01-01'; $active = $false; $lastMons = @(); $lastFix = Get-Date '2000-01-01'
-$seen = ''; $since = Get-Date
+if (-not $key) { Log 'no link key: run ftrd-host.ps1 -Setup (virtual monitors get a plain row until then)' }
+Log ("agent running; frame " + ($Frame -join ',') + " port $Port")
+$mons = @(); $lastAsk = Get-Date '2000-01-01'; $lastFix = Get-Date '2000-01-01'; $seen = ''; $since = Get-Date; $monsSeen = ''
 while ($true) {
   Start-Sleep -Milliseconds 1000
-  $control = $Control -or (Test-Path (Join-Path $Data 'control.on'))
-  $a = if ($key) { Ask-Frame $key } else { $null }
-  if ($a) { $lastAnswer = Get-Date; $lastMons = @($a.Monitors) }
-  $live = $a -and $lastMons.Count -gt 0
-  $stale = ((Get-Date) - $lastAnswer).TotalSeconds -gt $TimeoutSeconds
-  if (-not $live -and ($stale -or ($a -and $lastMons.Count -eq 0))) {
-    if ($active) {
-      Log ($(if ($stale) { "Frame silent for $TimeoutSeconds s" } else { 'Frame reports no monitors' }) + ': giving the PC its monitors back')
-      Restore-Physical 'restore (Frame gone)' $null
-      Remove-Item $ArmedFile -ErrorAction SilentlyContinue
-      if ($stale) { Terminate-Virtual }
-      $active = $false
+  if ($key -and ((Get-Date) - $lastAsk).TotalSeconds -ge 2) {
+    $lastAsk = Get-Date
+    $a = Ask-Frame $key
+    if ($a) {
+      $mons = @($a.Monitors)
+      $sig = ($mons | ForEach-Object { '{0}:{1}x{2}@{3}' -f $_.instance, $_.w, $_.h, $(if ($null -ne $_.az) { [Math]::Round([double]$_.az / 5) * 5 } else { '-' }) }) -join ' '
+      if ($sig -ne $monsSeen) { $monsSeen = $sig; Log "Frame: $(if ($sig) { $sig } else { 'no monitors' })"; $since = Get-Date '2000-01-01' }
     }
-    $lastMons = @()
-  } elseif ($live -and -not $active) { Log ("Frame shows " + $lastMons.Count + " monitor(s)"); $active = $true }
-
-  # What the displays should look like now; act once it's been wrong and stable for 3 s.
+  }
+  # Act once the displays have been wrong and stable for 3 s (Vibepollo is mid-change otherwise).
   $os = Outputs
   $d = Describe $os
   if ($d -ne $seen) { $seen = $d; $since = Get-Date; continue }
-  if (((Get-Date) - $since).TotalSeconds -lt 3 -or ((Get-Date) - $lastFix).TotalSeconds -lt 8) { continue }
-  if ($active -and $control) {
-    $plan = Plan-Virtual $lastMons $os 0 $true
-    if (-not $plan) { continue }  # the virtual monitors aren't there yet
-    $physOn = @($os | Where-Object { $_.Attached -and -not $_.Virtual })
-    if ($physOn -or -not (Plan-Matches $plan $os)) {
-      $lastFix = Get-Date
-      New-Item -ItemType File -Force -Path $ArmedFile | Out-Null
-      $entries = @($plan) + @($physOn | ForEach-Object { @{ Name = $_.Name; Fields = ($DM_POSITION -bor $DM_W -bor $DM_H); X = 0; Y = 0; W = 0; H = 0; Primary = $false } })
-      [void](Apply-Batch $entries 'control: virtual monitors as on the Frame, physical off')
-    }
-  } else {
-    if (Test-Path $ArmedFile) { $lastFix = Get-Date; Restore-Physical 'restore (control off)' $null; Remove-Item $ArmedFile -ErrorAction SilentlyContinue; continue }
-    $b = Get-Baseline
-    $right = if ($b) { ($b | ForEach-Object { $_.X + $_.W } | Measure-Object -Maximum).Maximum } else { 0 }
-    $plan = if ($active) { Plan-Virtual $lastMons $os $right $false } else { @() }
-    if (-not (Physical-Matches $os) -or ($plan -and -not (Plan-Matches $plan $os))) {
-      $lastFix = Get-Date
-      Restore-Physical $(if ($active) { 'observe: physical as the baseline, virtual monitors as on the Frame' } else { 'physical layout back to the baseline' }) $plan
-    }
+  if (((Get-Date) - $since).TotalSeconds -lt 3 -or ((Get-Date) - $lastFix).TotalSeconds -lt 5) { continue }
+  $b = Get-Baseline
+  $right = if ($b) { ($b | ForEach-Object { $_.X + $_.W } | Measure-Object -Maximum).Maximum } else {
+    ($os | Where-Object { $_.Attached -and -not $_.Virtual } | ForEach-Object { $_.X + $_.W } | Measure-Object -Maximum).Maximum }
+  $plan = @(Plan-Virtual $mons $os $right)
+  if (-not (Physical-Matches $os) -or ($plan -and -not (Plan-Matches $plan $os))) {
+    $lastFix = Get-Date
+    Restore-Physical 'layout: physical as the baseline, virtual monitors right of them as on the Frame' $plan
   }
 }
