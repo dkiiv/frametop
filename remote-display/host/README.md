@@ -41,10 +41,15 @@ window right after you ran the installer.
   head changes nothing). Windows is changed only when its displays have been unchanged for 5 s
   and no monitor is starting or resizing, and only for what differs (usually one monitor's
   position).
-- **Notes a virtual monitor Vibepollo left behind** (after the Frame has reported no monitors
-  for 30 s) in its log. It doesn't remove it: Vibepollo's `terminate_virtual` also shuts its
-  virtual display driver down until the service restarts. `stream.sh cleanup` on the Frame
-  releases it.
+- **Has the Frame release a virtual monitor Vibepollo left behind**: when the Frame reports no
+  monitors but one is still attached (3 s, displays settled), its pings say `FTRD2 PING <nonce>
+  leftover`, and the Frame's ftrd-presence (which answers for 20 s after the last monitor
+  closes) runs `stream.sh cleanup` once: a short start + release per identity. Not Vibepollo's
+  `terminate_virtual`: that also shuts its virtual display driver down until the service
+  restarts.
+- **Starts without a window**: the Startup shortcut runs it through `conhost.exe --headless`
+  (`powershell -WindowStyle Hidden` alone leaves an empty window where Windows Terminal is the
+  default console).
 
 ## The link to the Frame
 
