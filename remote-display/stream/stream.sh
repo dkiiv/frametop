@@ -10,6 +10,7 @@
 #                                               monitor on the PC) in its own Frametop panel; resizing
 #                                               the panel resizes the monitor
 #   stream.sh float-desktop                     the PC's own desktop (its physical monitors), floating
+#   stream.sh cleanup                           clear virtual monitors Vibepollo kept after release
 #   stream.sh install-desktop                   the desktop files ft-float launch needs
 # Identity N: keys in ~/.config/frametop-remote-display (N=1) or .../N. Vibepollo gives each paired
 # identity one virtual monitor. Instance "desktop" (float-desktop) uses identity 1.
@@ -81,6 +82,19 @@ case ${1:-status} in
     exec "$HOME/dev/frametop/float/ft-float" launch "org.frametop.RemoteMonitor${2:-1}" ;;
   float-desktop)
     exec "$HOME/dev/frametop/float/ft-float" launch org.frametop.RemoteDisplay ;;
+  cleanup)  # Vibepollo 2.0.0 sometimes keeps a released virtual monitor (its ownership
+    # bookkeeping); a short start + release by each paired identity clears it. Monitors flash.
+    [ -z "$(for n in $(instances); do pidof_i "$n"; done)" ] || { echo "stop the streams first (stream.sh off)"; exit 1; }
+    for n in 1 2 3 4; do
+      [ -f "$(keys "$n")/uniqueid.dat" ] && "$bin" --keys "$(keys "$n")" --novr --app-id 2147483502 --seconds 1 >/dev/null 2>&1
+    done
+    sleep 4
+    for n in 1 2 3 4; do
+      [ -f "$(keys "$n")/uniqueid.dat" ] || continue
+      "$bin" --keys "$(keys "$n")" --novr --no-yield --app "Remote Monitor" --size 2560x1440 --seconds 3 2>&1 |
+        grep -E "^app:|failed|released" | sed "s/^/identity $n: /"
+      sleep 3
+    done ;;
   install-desktop)  # ~/.local/share/applications
     apps=$HOME/.local/share/applications
     mkdir -p "$apps"
@@ -102,5 +116,5 @@ StartupWMClass=org.frametop.RemoteMonitor$n
 EOF
     done
     echo "installed: $(cd "$apps" && ls org.frametop.Remote*.desktop | tr '\n' ' ')" ;;
-  *) echo "usage: stream.sh on [-i N] [opts]|off [N|all]|status|log [N]|pair [-i N] PIN|float [N]|float-desktop|install-desktop"; exit 2 ;;
+  *) echo "usage: stream.sh on [-i N] [opts]|off [N|all]|status|log [N]|pair [-i N] PIN|float [N]|float-desktop|cleanup|install-desktop"; exit 2 ;;
 esac

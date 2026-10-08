@@ -18,6 +18,7 @@
 //                       overlay (default size: the stream's); NV12 straight to KWin, no GPU pass.
 //                       WAYLAND_DISPLAY must name the desktop's socket (stream.sh sets it).
 //     --wl-id ID, --title T   the window's app id / title (one per instance; ft-float matches the id)
+//     --no-yield        keep streaming during VR games (default: yield, see GameWatch)
 //     --follow-size     window mode: when the window is resized (and stays so for 1.5 s), reconnect
 //                       at the window's size; with "Remote Monitor" the PC's virtual monitor takes
 //                       that size (default on for Remote Monitor in window mode)
@@ -39,6 +40,11 @@ extern "C" {
 #include "errors.h"
 }
 
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <poll.h>
+#include <cstddef>
+
 #include <atomic>
 #include <functional>
 #include <mutex>
@@ -50,7 +56,7 @@ struct Opts {
     std::string host = "10.35.78.22", app = "Desktop", keys;
     const char *pair = nullptr, *dump = nullptr;
     int w = 5120, h = 1440, fps = 90, bitrate = 50000, dumpFrame = 300;
-    bool hevc = true, vr = true, inputTest = false, wl = false, follow = false, followSet = false;
+    bool hevc = true, vr = true, inputTest = false, wl = false, follow = false, followSet = false, yield = true;
     std::string wlId = "org.frametop.RemoteDisplay", wlTitle = "Remote PC";
     int appId = -1;
     int winW = 0, winH = 0;
@@ -86,6 +92,54 @@ vr::VROverlayHandle_t g_ov = vr::k_ulOverlayHandleInvalid;
 bool g_ovShown = false;
 #endif
 bool g_needIdr = false;
+
+// ---- yielding to VR games (M5) --------------------------------------------------------------
+// Frametop's screens and floating panels hide while a VR game (a SteamVR scene app) runs, unless
+// "ingames visible" is set (Frametop Display Settings). While they're hidden, the stream steps
+// aside: the connection stops (decoder freed, no video over Wi-Fi, no encoding on the PC) and the
+// overlay mode's panel and keyboard button hide, so no laser reaches them. Vibepollo keeps the
+// Remote Monitor (so the PC's windows stay where they are) and the stream resumes on game exit.
+// The game state comes from ft-screens ("state" on @ft_screens). FTRD_FAKE_GAME=<file>: the
+// file's existence stands in for a running game (headless tests).
+struct GameWatch {
+    int fd = -1;
+    int64_t lastAsk = 0;
+    bool game = false, hide = true, known = false;
+    void Ask(int64_t now) {
+        if (now - lastAsk < 500000000LL) return;
+        lastAsk = now;
+        if (const char *f = getenv("FTRD_FAKE_GAME")) {
+            game = access(f, F_OK) == 0, hide = true, known = true;
+            return;
+        }
+        if (fd < 0) {
+            fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+            sockaddr_un me{};
+            me.sun_family = AF_UNIX;  // autobind: an abstract name of our own, for the reply
+            bind(fd, reinterpret_cast<sockaddr *>(&me), sizeof(sa_family_t));
+        }
+        char buf[256];
+        while (recv(fd, buf, sizeof buf - 1, 0) > 0) {}  // stale replies
+        sockaddr_un to{};
+        to.sun_family = AF_UNIX;
+        const char name[] = "ft_screens";
+        memcpy(to.sun_path + 1, name, sizeof name - 1);
+        sendto(fd, "state", 5, 0, reinterpret_cast<sockaddr *>(&to), socklen_t(offsetof(sockaddr_un, sun_path) + 1 + sizeof name - 1));
+        pollfd p{fd, POLLIN, 0};
+        if (poll(&p, 1, 100) <= 0) return;  // ft-screens not answering: keep the last state
+        const ssize_t n = recv(fd, buf, sizeof buf - 1, 0);
+        if (n <= 0) return;
+        buf[n] = 0;
+        // "ok <mode> <manual> <wrist> <hand> <gesture> <controllers> <game 0|1> <ingames>"
+        char mode[32], hand[16], lasers[32], ingames[16];
+        int manual = 0, running = 0;
+        double wrist = 0, gesture = 0;
+        if (sscanf(buf, "ok %31s %d %lf %15s %lf %31s %d %15s", mode, &manual, &wrist, hand, &gesture, lasers, &running,
+                   ingames) == 8)
+            game = running != 0, hide = strcmp(ingames, "visible") != 0, known = true;
+    }
+    bool Yield() const { return known && game && hide; }
+} g_game;
 
 }  // namespace
 #include "wlwin.h"
@@ -494,6 +548,7 @@ int main(int argc, char **argv) {
         else if (a == "--app") g_o.app = next();
         else if (a == "--app-id") g_o.appId = atoi(next());  // e.g. a Vibepollo control the list hides
         else if (a == "--wl-id") g_o.wlId = next();
+        else if (a == "--no-yield") g_o.yield = false;
         else if (a == "--title") g_o.wlTitle = next();
         else if (a == "--follow-size") g_o.follow = true, g_o.followSet = true;
         else if (a == "--no-follow-size") g_o.follow = false, g_o.followSet = true;
@@ -628,7 +683,10 @@ int main(int argc, char **argv) {
     // first Remote Monitor attempt fails ("composed display topology did not apply") and leaves
     // Windows' default arrangement, from which another attempt usually works. A failed attempt
     // can leave this client owning a half-made monitor, so release it before each retry.
-    for (int attempt = 1; attempt <= 3 && r != GS_OK && gs_error && strstr(gs_error, "did not apply"); ++attempt) {
+    // "not yet capture-ready": a monitor of this client's is stuck at another size. Same cure.
+    for (int attempt = 1; attempt <= 3 && r != GS_OK && gs_error &&
+                          (strstr(gs_error, "did not apply") || strstr(gs_error, "not yet capture-ready"));
+         ++attempt) {
         printf("host: \"%s\"; release and retry (%d/3)\n", gs_error, attempt);
         server.currentGame = 0;
         gs_start_app(&server, &cfg, 2147483502 /* Disconnect Monitor */, false, true, 0);
@@ -666,6 +724,8 @@ int main(int argc, char **argv) {
     }
     int64_t lastPrint = MonoNs();
     int64_t lastResize = MonoNs();
+    bool suspended = false;
+    int64_t suspendedAt = 0;
     const CpuStat cpu0 = ReadCpu();
     int64_t lastSample = MonoNs();
     bool inputTested = false;
@@ -704,6 +764,52 @@ int main(int argc, char **argv) {
             lastPrint = now;
         }
         if (g_o.seconds > 0 && (now - t0) / 1e9 >= g_o.seconds) break;
+        // Yield to VR games: stop the connection while one runs, resume when it ends.
+        if (g_o.yield) {
+            g_game.Ask(now);
+            if (g_game.Yield() && !suspended) {
+                const int64_t s0 = MonoNs();
+                printf("game: a VR game is running; stream suspended\n");
+                LiStopConnection();  // the decoder is released (DrCleanup); Vibepollo keeps the monitor
+                // Frames still queued for the window point at capture buffers that are gone now.
+                if (g_o.wl) WlNewStream(g_o.w, g_o.h);
+#ifdef FTRD_VR
+                if (g_o.vr) {
+                    vr::VROverlay()->HideOverlay(g_ov), g_ovShown = false;
+                    if (g_kbButton != vr::k_ulOverlayHandleInvalid) vr::VROverlay()->HideOverlay(g_kbButton);
+                    if (g_kbShown) vr::VROverlay()->HideKeyboard(), g_kbShown = false;
+                    ReleaseButtons();
+                }
+#endif
+                if (g_o.wl) WlReleaseKeys(), PtrLeave(nullptr, nullptr, 0, nullptr);
+                suspended = true, suspendedAt = now;
+                printf("game: suspended in %.2f s\n", (MonoNs() - s0) / 1e9);
+            } else if (!g_game.Yield() && suspended) {
+                const int64_t s0 = MonoNs();
+                printf("game: ended after %.0f s; resuming\n", (now - suspendedAt) / 1e9);
+                if (g_o.app == "Remote Monitor") {
+                    // Vibepollo kept the monitor; its "Resume" control (a launch, not /resume)
+                    // reattaches to it at the same size, so the PC's windows stay put.
+                    server.currentGame = 0;
+                    r = gs_start_app(&server, &cfg, 2147483501 /* Resume */, false, true, 0);
+                    if (r != GS_OK) {
+                        printf("game: Resume failed (%s); starting a new monitor\n", gs_error ? gs_error : "?");
+                        server.currentGame = 0;
+                        gs_start_app(&server, &cfg, 2147483502 /* Disconnect Monitor */, false, true, 0);
+                        server.currentGame = 0;
+                        if (launch()) { g_termError = 1; g_terminated = true; break; }
+                    }
+                } else if (launch()) { g_termError = 1; g_terminated = true; break; }
+                r = LiStartConnection(&server.serverInfo, &cfg, &cl, &dr, nullptr, nullptr, 0, nullptr, 0);
+                if (r != 0) { fprintf(stderr, "LiStartConnection failed (%d)\n", r); g_termError = 1; break; }
+#ifdef FTRD_VR
+                if (g_o.vr && g_kbButton != vr::k_ulOverlayHandleInvalid) vr::VROverlay()->ShowOverlay(g_kbButton);
+#endif
+                suspended = false;
+                printf("game: resumed in %.1f s\n", (MonoNs() - s0) / 1e9);
+            }
+            if (suspended) continue;
+        }
         // Follow the window's size: reconnect at it once it has settled.
         if (g_o.follow && g_wl.winW > 0 && g_wl.winH > 0 && now - g_wl.resizedNs > 1500000000LL &&
             now - lastResize > 3000000000LL) {
@@ -740,7 +846,7 @@ int main(int argc, char **argv) {
         WlReleaseKeys();
         PtrLeave(nullptr, nullptr, 0, nullptr);  // releases the PC's mouse buttons
     }
-    LiStopConnection();
+    if (!suspended) LiStopConnection();
     gs_quit_app(&server);
     // Vibepollo keeps a Remote Monitor's virtual display after the stream ends, and with two
     // clients its deferred cleanup can leave one behind. Release ours explicitly.
