@@ -123,7 +123,8 @@ function Describe($os) {
 
 # ---- baseline (the physical layout to keep) ------------------------------------------
 $BaselineFile = Join-Path $Data 'baseline.json'
-function Get-Baseline { if (Test-Path $BaselineFile) { Get-Content $BaselineFile -Raw | ConvertFrom-Json } else { $null } }
+# (ConvertFrom-Json in PowerShell 5.1 outputs a JSON array as one object; ForEach unrolls it.)
+function Get-Baseline { if (Test-Path $BaselineFile) { Get-Content $BaselineFile -Raw | ConvertFrom-Json | ForEach-Object { $_ } } else { $null } }
 function Save-Baseline {
   $phys = @(Outputs | Where-Object { $_.Attached -and -not $_.Virtual })
   if (-not $phys) { Log 'no attached physical monitor; baseline not saved'; return }
@@ -575,6 +576,10 @@ if ($Install) {
   $sc.Save()
   Open-Pairing 30
   Start-Process -WindowStyle Hidden -FilePath $ps -ArgumentList @('-NoProfile', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', $dest, '-Run')
+  # A short command for the rest (ftrd-host -Status, ...): a .cmd in WindowsApps, a folder
+  # Windows keeps on every user's PATH.
+  Set-Content (Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\ftrd-host.cmd') -Encoding ASCII `
+    "@powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"%LOCALAPPDATA%\ftrd\ftrd-host.ps1`" %*"
   Log "installed: $dest, started now and at every logon; pairing open for 30 minutes"
   Write-Host "`nThe PC is ready. In the headset: Steam button -> + -> Remote PC (within 30 minutes, it pairs"
   Write-Host "by itself; later, this PC asks before a new Frame pairs)."
@@ -584,6 +589,7 @@ if ($AllowPairing) { Open-Pairing 15; Log 'pairing open for 15 minutes'; exit 0 
 if ($ShowLogin) { $l = Read-Secret 'vibepollo-login.dpapi'; if ($l) { $u, $pw = $l -split "`n"; "Vibepollo web page (https://localhost:47990): user $u, password $pw" } else { 'no login saved here (it was made before this helper, or elsewhere)' }; exit 0 }
 if ($Uninstall) {
   Remove-Item (Join-Path ([Environment]::GetFolderPath('Startup')) 'ftrd-host.lnk') -ErrorAction SilentlyContinue
+  Remove-Item (Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\ftrd-host.cmd') -ErrorAction SilentlyContinue
   Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -ne $PID -and $_.Name -eq 'powershell.exe' -and $_.CommandLine -like '*ftrd-host.ps1*-Run*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
   Write-Host 'Remote PC helper stopped and removed from logon.'
   $rm = [bool]$RemoveVibepollo

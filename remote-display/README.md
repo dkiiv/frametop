@@ -27,8 +27,7 @@ Click **Yes** when Windows asks. It installs [Vibepollo](https://github.com/Nona
 2.0.0 (the streaming host: a Sunshine fork that makes a virtual monitor per device; it replaces
 Sunshine if you have it), and a small Remote PC helper that pairs the Frame for you and keeps
 your monitor layout in order. It shows the login it made for Vibepollo's own settings page; you
-rarely need it (`-ShowLogin` shows it again; the helper's commands in this guide run in PowerShell
-as `powershell -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\ftrd\ftrd-host.ps1" -Command`). Arrange your physical monitors the
+rarely need it (`ftrd-host -ShowLogin` in PowerShell shows it again). Arrange your physical monitors the
 way you like them before you run it: that's the layout the helper keeps.
 
 ### 2. On the Frame, from the PC over SSH (about 15 minutes, mostly downloading)
@@ -60,7 +59,7 @@ ssh -t steamos@FRAME "~/frametop/remote-display/stream/stream.sh setup"
 ```
 It finds your PC and pairs two monitors with it (`setup 3` for three, up to 4), nothing to type:
 within 30 minutes of step 1 the PC agrees by itself. Later, the PC asks first (a window on its
-screen: click Yes; or run `powershell -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\ftrd\ftrd-host.ps1" -AllowPairing` before).
+screen: click Yes; or run `ftrd-host -AllowPairing` before).
 
 ### 3. In the headset
 
@@ -100,21 +99,21 @@ and logged in).
   two aren't on the same network.
 - **Your physical monitors are rearranged or at a lower refresh rate:** Vibepollo 2.0.0 shuffles
   them when virtual monitors come and go; the helper puts them back within seconds. After
-  changing your layout on purpose: `powershell -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\ftrd\ftrd-host.ps1" -SaveBaseline`.
+  changing your layout on purpose: `ftrd-host -SaveBaseline`.
 - **A virtual monitor stays in Windows after you closed everything** (Vibepollo 2.0.0 sometimes
   keeps one): the helper removes it after 30 seconds.
 - **Physical monitors dark:** Win+P → Extend. (This happened with Vibepollo's "Desktop" app, which
   makes its virtual screen the only display; Remote PC never starts that app.)
 - **A panel stays dark:** `ssh steamos@FRAME ~/frametop/remote-display/stream/stream.sh status`
   (and `... stream.sh log 1`) shows what the stream is doing; on the PC,
-  `powershell -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\ftrd\ftrd-host.ps1" -Status` shows the displays and what the Frame reports, and
+  `ftrd-host -Status` shows the displays and what the Frame reports, and
   `%LOCALAPPDATA%\ftrd\ftrd-host.log` what the helper did.
 - **Set up again** (another PC, more monitors): the pairing line above again (`setup 3` for
   three monitors, up to 4; `setup ADDRESS` if your network blocks discovery).
 
 ## Uninstall
 
-- **PC:** in PowerShell, `powershell -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\ftrd\ftrd-host.ps1" -Uninstall` (it asks whether
+- **PC:** in PowerShell, `ftrd-host -Uninstall` (it asks whether
   to remove Vibepollo too).
 - **Frame:** Frametop's uninstaller removes Remote PC with it: `ssh -t steamos@FRAME
   ~/frametop/uninstall.sh`, restart the headset, run it again (see [Uninstall](../README.md#uninstall)
