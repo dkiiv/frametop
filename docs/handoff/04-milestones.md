@@ -101,9 +101,11 @@ Desktop Streamer uses it).
       a host-side focus signal (Vibepollo/Sunshine) -> auto-open. Note: the controller's
       system ("...") button can't be mapped (Frametop maps every button but that one; it's
       SteamVR's dashboard toggle) — Curtis tried it on 2026-10-07; use another button.
-- [ ] Wrist pinning of the stream window untested (second controller was away).
-- [ ] Upstream the grab-bar hit-box fix (commit "screens: set controls' mouse scale...") to
-      Frametop as its own PR.
+- [x] Wrist pinning of the stream window works (Curtis, 2026-10-07).
+- [x] Upstream the grab-bar hit-box fix: branch fix/grab-bar-hit-box on the fork (on upstream
+      main), PR link handed to Curtis. Upstream PR #46 (SaberMage, same fix, opened earlier the
+      same day) was already pulled in by the maintainer "for the next release", so ours is a
+      duplicate unless he wants it for the record.
 - [ ] Lowest-row pointer diagnostics stay behind FTRD_POINTER_DEBUG=1; drop when no longer
       useful.
 
