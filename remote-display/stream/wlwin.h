@@ -47,7 +47,10 @@ struct Wl {
     int winW = 0, winH = 0;          // window size (logical), from configure; 0 = ours to pick
     int defW = 0, defH = 0;          // the size we pick
     int streamW = 0, streamH = 0;
-    std::vector<wl_buffer *> bufs;   // per capture buffer index
+    std::vector<wl_buffer *> bufs;   // per capture buffer index (this stream generation)
+    std::vector<wl_buffer *> oldBufs;  // a previous stream's, destroyed once a new frame is up
+    int gen = 0;                     // stream generation (bumped on reconnect, e.g. a resize)
+    int64_t resizedNs = 0;           // when the window last changed size
     int attached = -1;               // on screen now (KWin may still hold it until release)
     std::vector<bool> held;          // KWin holds it: don't requeue until release
     // decoder thread -> main thread
@@ -231,6 +234,9 @@ const xdg_surface_listener kXs = {XsConfigure};
 void TopConfigure(void *, xdg_toplevel *, int32_t w, int32_t h, wl_array *) {
     if (w > 0 && h > 0 && (w != g_wl.winW || h != g_wl.winH)) {
         g_wl.winW = w, g_wl.winH = h;
+        timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        g_wl.resizedNs = int64_t(ts.tv_sec) * 1000000000LL + ts.tv_nsec;
         printf("window: %dx%d\n", w, h);
     }
 }
@@ -240,7 +246,9 @@ void TopCaps(void *, xdg_toplevel *, wl_array *) {}
 const xdg_toplevel_listener kTop = {TopConfigure, TopClose, TopBounds, TopCaps};
 
 void BufRelease(void *data, wl_buffer *) {
-    const int i = int(reinterpret_cast<intptr_t>(data));
+    const intptr_t v = reinterpret_cast<intptr_t>(data);
+    if (int(v >> 8) != g_wl.gen) return;  // a previous stream's buffer: its decoder is gone
+    const int i = int(v & 0xff);
     if (i >= 0 && i < int(g_wl.held.size()) && g_wl.held[size_t(i)]) {
         g_wl.held[size_t(i)] = false;
         QueueCap(g_D, i);
@@ -261,7 +269,20 @@ void RegRemove(void *, wl_registry *, uint32_t) {}
 const wl_registry_listener kReg = {RegGlobal, RegRemove};
 
 // ---- setup / frames ------------------------------------------------------------------------
-bool WlInit(int streamW, int streamH, int winW, int winH) {
+// Main thread, after LiStopConnection (the decoder and its capture buffers are gone): keep the
+// last picture on screen, retire this stream's wl_buffers, and drop queued frames.
+void WlNewStream(int streamW, int streamH) {
+    for (wl_buffer *b : g_wl.bufs) if (b) g_wl.oldBufs.push_back(b);
+    g_wl.bufs.clear(), g_wl.held.clear();
+    {
+        std::lock_guard<std::mutex> l(g_wl.mu);
+        g_wl.q.clear();
+    }
+    ++g_wl.gen;
+    g_wl.streamW = streamW, g_wl.streamH = streamH;
+}
+
+bool WlInit(int streamW, int streamH, int winW, int winH, const char *appId, const char *title) {
     g_wl.streamW = streamW, g_wl.streamH = streamH, g_wl.defW = winW, g_wl.defH = winH;
     g_wl.dpy = wl_display_connect(nullptr);
     if (!g_wl.dpy) return fprintf(stderr, "window: can't connect to WAYLAND_DISPLAY=%s\n", getenv("WAYLAND_DISPLAY") ?: "(unset)"), false;
@@ -278,8 +299,8 @@ bool WlInit(int streamW, int streamH, int winW, int winH) {
     xdg_surface_add_listener(g_wl.xsurf, &kXs, nullptr);
     g_wl.top = xdg_surface_get_toplevel(g_wl.xsurf);
     xdg_toplevel_add_listener(g_wl.top, &kTop, nullptr);
-    xdg_toplevel_set_title(g_wl.top, "Remote PC");
-    xdg_toplevel_set_app_id(g_wl.top, "org.frametop.RemoteDisplay");
+    xdg_toplevel_set_title(g_wl.top, title);
+    xdg_toplevel_set_app_id(g_wl.top, appId);
     if (g_wl.decoMgr) {
         auto *d = zxdg_decoration_manager_v1_get_toplevel_decoration(g_wl.decoMgr, g_wl.top);
         zxdg_toplevel_decoration_v1_set_mode(d, ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
@@ -302,7 +323,7 @@ wl_buffer *WlBufferFor(int i) {
     wl_buffer *b = zwp_linux_buffer_params_v1_create_immed(params, int(g_D.visible.width), int(g_D.visible.height),
                                                            DRM_FORMAT_NV12, 0);
     zwp_linux_buffer_params_v1_destroy(params);
-    wl_buffer_add_listener(b, &kBuf, reinterpret_cast<void *>(intptr_t(i)));
+    wl_buffer_add_listener(b, &kBuf, reinterpret_cast<void *>((intptr_t(g_wl.gen) << 8) | intptr_t(i)));
     g_wl.bufs[size_t(i)] = b;
     return b;
 }
@@ -330,6 +351,8 @@ void WlFrames(std::function<void(int frame)> shown) {
     wl_display_flush(g_wl.dpy);
     g_wl.attached = f.capIdx;
     ++g_wl.commits;
+    for (wl_buffer *ob : g_wl.oldBufs) if (ob) wl_buffer_destroy(ob);  // the new stream is up
+    g_wl.oldBufs.clear();
     shown(f.frame);
 }
 

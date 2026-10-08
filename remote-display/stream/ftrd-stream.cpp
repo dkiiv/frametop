@@ -17,6 +17,10 @@
 //     --window [WxH]    M4: a Wayland window on the Frame's desktop (KWin) instead of a SteamVR
 //                       overlay (default size: the stream's); NV12 straight to KWin, no GPU pass.
 //                       WAYLAND_DISPLAY must name the desktop's socket (stream.sh sets it).
+//     --wl-id ID, --title T   the window's app id / title (one per instance; ft-float matches the id)
+//     --follow-size     window mode: when the window is resized (and stays so for 1.5 s), reconnect
+//                       at the window's size; with "Remote Monitor" the PC's virtual monitor takes
+//                       that size (default on for Remote Monitor in window mode)
 //     --dump F --dump-frame N   write decoded frame N as RGBA (after GPU conversion)
 //     --keys DIR        client cert/key dir (default ~/.config/frametop-remote-display)
 //     --input-test      3 s in, move the PC's cursor to (1234, 567) (checks the input path headless)
@@ -46,7 +50,8 @@ struct Opts {
     std::string host = "10.35.78.22", app = "Desktop", keys;
     const char *pair = nullptr, *dump = nullptr;
     int w = 5120, h = 1440, fps = 90, bitrate = 50000, dumpFrame = 300;
-    bool hevc = true, vr = true, inputTest = false, wl = false;
+    bool hevc = true, vr = true, inputTest = false, wl = false, follow = false, followSet = false;
+    std::string wlId = "org.frametop.RemoteDisplay", wlTitle = "Remote PC";
     int appId = -1;
     int winW = 0, winH = 0;
     double panelW = 2.4, dist = 1.5, seconds = 0;
@@ -488,6 +493,10 @@ int main(int argc, char **argv) {
         else if (a == "--host") g_o.host = next();
         else if (a == "--app") g_o.app = next();
         else if (a == "--app-id") g_o.appId = atoi(next());  // e.g. a Vibepollo control the list hides
+        else if (a == "--wl-id") g_o.wlId = next();
+        else if (a == "--title") g_o.wlTitle = next();
+        else if (a == "--follow-size") g_o.follow = true, g_o.followSet = true;
+        else if (a == "--no-follow-size") g_o.follow = false, g_o.followSet = true;
         else if (a == "--size") sscanf(next(), "%dx%d", &g_o.w, &g_o.h);
         else if (a == "--fps") g_o.fps = atoi(next());
         else if (a == "--bitrate") g_o.bitrate = atoi(next());
@@ -608,8 +617,12 @@ int main(int argc, char **argv) {
     }
 #endif
 
-    if (g_o.wl && !WlInit(g_o.w, g_o.h, g_o.winW ? g_o.winW : g_o.w, g_o.winH ? g_o.winH : g_o.h)) return 1;
+    if (g_o.wl && !WlInit(g_o.w, g_o.h, g_o.winW ? g_o.winW : g_o.w, g_o.winH ? g_o.winH : g_o.h, g_o.wlId.c_str(),
+                          g_o.wlTitle.c_str()))
+        return 1;
+    if (!g_o.followSet) g_o.follow = g_o.wl && g_o.app == "Remote Monitor";
 
+  auto launch = [&]() -> int {
     r = gs_start_app(&server, &cfg, appId, false, true /* audio stays on the PC */, 0);
     // Vibepollo 2.0.0: when the PC's primary monitor isn't the one Windows would put at 0,0, its
     // first Remote Monitor attempt fails ("composed display topology did not apply") and leaves
@@ -626,6 +639,9 @@ int main(int argc, char **argv) {
     if (r != GS_OK) return fprintf(stderr, "starting %s failed (%d): %s\n", g_o.app.c_str(), r, gs_error ? gs_error : ""), 1;
     printf("app: %s started at %dx%d %d fps %d kbps %s\n", g_o.app.c_str(), cfg.width, cfg.height, cfg.fps,
            cfg.bitrate, g_o.hevc ? "HEVC" : "H.264");
+    return 0;
+  };
+    if (launch()) return 1;
 
     DECODER_RENDERER_CALLBACKS dr;
     LiInitializeVideoCallbacks(&dr);
@@ -649,6 +665,7 @@ int main(int argc, char **argv) {
         return 1;
     }
     int64_t lastPrint = MonoNs();
+    int64_t lastResize = MonoNs();
     const CpuStat cpu0 = ReadCpu();
     int64_t lastSample = MonoNs();
     bool inputTested = false;
@@ -687,6 +704,29 @@ int main(int argc, char **argv) {
             lastPrint = now;
         }
         if (g_o.seconds > 0 && (now - t0) / 1e9 >= g_o.seconds) break;
+        // Follow the window's size: reconnect at it once it has settled.
+        if (g_o.follow && g_wl.winW > 0 && g_wl.winH > 0 && now - g_wl.resizedNs > 1500000000LL &&
+            now - lastResize > 3000000000LL) {
+            const int w = std::clamp(g_wl.winW & ~7, 640, 7680), h = std::clamp(g_wl.winH & ~7, 360, 4320);
+            if (std::abs(w - g_o.w) > 8 || std::abs(h - g_o.h) > 8) {
+                lastResize = now;
+                printf("resize: window %dx%d -> stream %dx%d (was %dx%d)\n", g_wl.winW, g_wl.winH, w, h, g_o.w, g_o.h);
+                const int64_t r0 = MonoNs();
+                LiStopConnection();
+                gs_quit_app(&server);
+                if (g_o.app == "Remote Monitor") {
+                    server.currentGame = 0;
+                    gs_start_app(&server, &cfg, 2147483502 /* Disconnect Monitor */, false, true, 0);
+                }
+                server.currentGame = 0;
+                g_o.w = w, g_o.h = h, cfg.width = w, cfg.height = h;
+                WlNewStream(w, h);
+                if (launch()) { g_termError = true; g_terminated = true; break; }
+                r = LiStartConnection(&server.serverInfo, &cfg, &cl, &dr, nullptr, nullptr, 0, nullptr, 0);
+                if (r != 0) { fprintf(stderr, "LiStartConnection failed (%d)\n", r); g_termError = true; break; }
+                printf("resize: reconnected in %.1f s\n", (MonoNs() - r0) / 1e9);
+            }
+        }
     }
     const double wall = (MonoNs() - t0) / 1e9;
     const CpuStat cpu1 = ReadCpu();

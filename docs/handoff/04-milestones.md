@@ -63,11 +63,27 @@ MikeTheTech "Virtual Display Driver" was removed on 2026-10-07 to avoid conflict
 backed up on the PC); Virtual Desktop's own "Virtual Desktop Monitor" stays (Virtual
 Desktop Streamer uses it).
 
-- [ ] Remote stream as a proper ft-screens output (Wayland client submitting
-      dmabufs, like KWin) so move/resize/curve/pin-wrist all come free.
-- [ ] Resolution/refresh renegotiation when the panel is resized.
+- [x] Remote stream as a floating Frametop window (Wayland client of the Frametop desktop,
+      dmabufs straight to KWin): move/resize/curve/pins come from Frametop. `stream.sh float N`.
+- [x] Resolution renegotiation when the panel is resized: window mode + Vibepollo Remote
+      Monitor reconnects at the window's size (~5 s); the PC's virtual monitor takes it.
+- [x] Several virtual monitors at once (one per paired identity, up to 4 in Vibepollo).
 - [ ] This is where you compare against the dev's design when it lands —
       rebase or throw away, his call via Curtis.
+
+### Known limitations (host: Vibepollo 2.0.0) — expected to be fixed upstream; revisit if not
+- Vibepollo doesn't remember the PC's monitor layout (confirmed by the Frametop dev). With
+  Curtis's layout (ultrawide primary at 0,0, 1080p below it) its first Remote Monitor start fails
+  ("composed display topology did not apply") and leaves Windows' default arrangement.
+  Workarounds: ftrd-stream releases and retries (up to 3x); a user-level watcher on the PC
+  (Startup folder, outside the repo; notes in ~/.local/share/ftrd on WSL) restores the layout
+  whenever it's wrong, during and after sessions. Monitors visibly rearrange for a few seconds
+  at each start/resize.
+- With two clients, Vibepollo sometimes keeps one virtual monitor after both released
+  ("Deferring virtual display cleanup..."); a start+release by each identity clears it.
+- Each extra virtual monitor needs its own paired identity, with Launch + input permissions
+  granted by hand in the web UI (Vibepollo gives full permissions only to the first pairing).
+- Untested: Vibepollo's `remote_monitor_disconnect_on_stream_end` setting, pre-release builds.
 
 ## M5 — Yield to games (the dev's "toggle + safe restore")
 
