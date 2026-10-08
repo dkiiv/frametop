@@ -101,7 +101,11 @@ and logged in).
   them when virtual monitors come and go; the helper puts them back within seconds. After
   changing your layout on purpose: `ftrd-host -SaveBaseline`.
 - **A virtual monitor stays in Windows after you closed everything** (Vibepollo 2.0.0 sometimes
-  keeps one): the helper removes it after 30 seconds.
+  keeps one, listed as screen 3, 4...): `ssh -t steamos@FRAME ~/frametop/remote-display/stream/stream.sh cleanup`
+  releases each monitor. Don't use Vibepollo's "terminate virtual displays" for it: that also
+  stops its display driver, and every Remote PC monitor then fails ("The composed display
+  topology did not apply") until Vibepollo's service is restarted (Services → Vibepollo /
+  ApolloService → Restart, or restart the PC).
 - **Physical monitors dark:** Win+P → Extend. (This happened with Vibepollo's "Desktop" app, which
   makes its virtual screen the only display; Remote PC never starts that app.)
 - **A panel stays dark:** `ssh steamos@FRAME ~/frametop/remote-display/stream/stream.sh status`

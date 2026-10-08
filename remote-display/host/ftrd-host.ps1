@@ -372,11 +372,13 @@ function Vp-Auth {
 
 # Leftover virtual monitors (Vibepollo 2.0.0 sometimes keeps one after its stream ended): ask
 # Vibepollo to remove them once the Frame has said "no monitors" for 30 s.
+# A virtual monitor still attached 30 s after the Frame closed all of them (Vibepollo 2.0.0
+# sometimes keeps one). Only noted: Vibepollo's /api/display/terminate_virtual removes it but
+# also shuts its virtual display driver down for good ("terminal driver and helper watchdog
+# shutdown"): every Remote Monitor after it failed with "The composed display topology did not
+# apply" until ApolloService was restarted. The Frame's stream.sh cleanup releases it gently.
 function Terminate-Virtual {
-  $auth = Vp-Auth
-  if (-not $auth) { Log 'leftover virtual monitor; no Vibepollo token, so left alone (stream.sh cleanup on the Frame clears it)'; return }
-  try { Log ('leftover virtual monitor: Vibepollo terminate_virtual: ' + (ConvertTo-Json -InputObject (Vp Post '/api/display/terminate_virtual' @{} $auth) -Compress)) }
-  catch { Log "leftover virtual monitor: Vibepollo terminate_virtual failed: $_" }
+  Log 'leftover virtual monitor after the Frame closed all of them; on the Frame, stream.sh cleanup releases it'
 }
 
 # Pairing. A Frame being set up answers our pings with FTRD2-PAIR {name, pin}; that's the PIN its

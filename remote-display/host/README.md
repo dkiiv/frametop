@@ -41,8 +41,10 @@ window right after you ran the installer.
   head changes nothing). Windows is changed only when its displays have been unchanged for 5 s
   and no monitor is starting or resizing, and only for what differs (usually one monitor's
   position).
-- **Removes a virtual monitor Vibepollo left behind** (after the Frame has reported no monitors
-  for 30 s), through its API token.
+- **Notes a virtual monitor Vibepollo left behind** (after the Frame has reported no monitors
+  for 30 s) in its log. It doesn't remove it: Vibepollo's `terminate_virtual` also shuts its
+  virtual display driver down until the service restarts. `stream.sh cleanup` on the Frame
+  releases it.
 
 ## The link to the Frame
 
