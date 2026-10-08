@@ -292,4 +292,22 @@ kwriteconfig6 --file "$XDG_CONFIG_HOME/ksmserverrc" --group General --key loginM
 # back on the first (primary) screen before Plasma reads the file (session/fix-panels.py).
 python3 "$here/fix-panels.py" --screens "$screens" || true
 
+# Plasma's first start here (no saved layout) can make its taskbar on a spare output, and
+# fix-panels.py above had nothing to repair yet: first-panel.sh repairs it from inside the
+# session once Plasma has saved its layout (plasmashell restarts once). Only on that start.
+autostart=$XDG_CONFIG_HOME/autostart/frametop-first-panel.desktop
+if [ ! -e "$XDG_CONFIG_HOME/plasma-org.kde.plasma.desktop-appletsrc" ]; then
+  mkdir -p "$(dirname "$autostart")"
+  cat > "$autostart" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Frametop first taskbar
+Exec=sh -c '"$here/first-panel.sh" $screens > /tmp/frametop-first-panel.log 2>&1; rm -f "$autostart"'
+X-KDE-autostart-phase=2
+NoDisplay=true
+EOF
+else
+  rm -f "$autostart"
+fi
+
 dbus-run-session startplasma-wayland

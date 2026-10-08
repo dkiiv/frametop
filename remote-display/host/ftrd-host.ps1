@@ -176,16 +176,7 @@ function Restore-Physical($why, $virtualPlan) {
     [void](Apply-Batch $entries "$why (retry)")
   }
 }
-function Physical-Matches($os) {
-  $b = Get-Baseline
-  if (-not $b) { return $true }
-  foreach ($e in $b) {
-    $o = Find-Output $os $e
-    if (-not $o -or -not $o.Attached) { return $false }
-    if ($o.X -ne $e.X -or $o.Y -ne $e.Y -or $o.W -ne $e.W -or $o.H -ne $e.H -or $o.Primary -ne [bool]$e.Primary -or ($e.Hz -and $o.Hz -lt $e.Hz)) { return $false }
-  }
-  return $true
-}
+function Physical-Matches($os) { @(Layout-Changes $os '' @{}).Count -eq 0 }
 
 # ---- which Windows display shows which Frame monitor --------------------------------------
 # The Frame sends its client certificate's SHA-256; Vibepollo's state file has each pairing's
@@ -266,25 +257,22 @@ function Resolve-Displays($mons, $os) {
 }
 
 # The changes needed: physical monitors not at the baseline, virtual ones not where the spec
-# puts them (right of the physical ones, top-aligned). Only what differs; mode fields only for
-# a physical monitor whose mode differs (a position change alone doesn't re-mode anything).
+# puts them (right of the physical ones, top-aligned). Positions are relative: Windows puts the
+# primary display at 0,0, so making a virtual monitor primary shifts everything, and that's fine.
+# Primary: a virtual one the user picked stays primary; otherwise the baseline's physical one.
+# Only what differs; mode fields only for a physical monitor whose mode differs.
 function Layout-Changes($os, $spec, $map) {
-  $entries = @()
-  $b = Get-Baseline
-  if ($b) {
-    foreach ($e in $b) {
-      $o = Find-Output $os $e
-      if (-not $o -or -not $o.Attached) { continue }  # never attach a monitor that's off
-      $modeOff = $o.W -ne $e.W -or $o.H -ne $e.H -or ($e.Hz -and $o.Hz -lt $e.Hz)
-      if ($modeOff -or $o.X -ne $e.X -or $o.Y -ne $e.Y -or ($e.Primary -and -not $o.Primary)) {
-        $f = $DM_POSITION; if ($modeOff) { $f = $f -bor $DM_W -bor $DM_H -bor $DM_FREQ }
-        $entries += @{ Name = $o.Name; Fields = $f; X = $e.X; Y = $e.Y; W = $e.W; H = $e.H; Hz = $e.Hz; Primary = [bool]$e.Primary }
-      }
-    }
-    $right = ($b | ForEach-Object { $_.X + $_.W } | Measure-Object -Maximum).Maximum
-  } else {
-    $right = ($os | Where-Object { $_.Attached -and -not $_.Virtual } | ForEach-Object { $_.X + $_.W } | Measure-Object -Maximum).Maximum
+  $b = @(Get-Baseline)
+  $tgt = @{}; $phys = @{}; $modeOff = @{}
+  foreach ($e in $b) {
+    if (-not $e) { continue }
+    $o = Find-Output $os $e
+    if (-not $o -or -not $o.Attached) { continue }  # never attach a monitor that's off
+    $tgt[$o.Name] = @($e.X, $e.Y); $phys[$o.Name] = $e
+    $modeOff[$o.Name] = $o.W -ne $e.W -or $o.H -ne $e.H -or ($e.Hz -and $o.Hz -lt $e.Hz)
   }
+  $right = if ($phys.Count) { ($phys.Values | ForEach-Object { $_.X + $_.W } | Measure-Object -Maximum).Maximum }
+           else { ($os | Where-Object { $_.Attached -and -not $_.Virtual } | ForEach-Object { $_.X + $_.W } | Measure-Object -Maximum).Maximum }
   if ($spec) {
     $x = $right
     foreach ($col in $spec.Split('|')) {
@@ -292,10 +280,45 @@ function Layout-Changes($os, $spec, $map) {
       foreach ($id in $col.Split(',')) {
         $o = $map[$id]
         if (-not $o) { continue }
-        if ($o.X -ne $x -or $o.Y -ne $y) { $entries += @{ Name = $o.Name; Fields = $DM_POSITION; X = $x; Y = $y; Primary = $false } }
+        $tgt[$o.Name] = @($x, $y)
         $y += $o.H; $cw = [Math]::Max($cw, $o.W)
       }
       $x += $cw
+    }
+  }
+  # Whose position is 0,0: the current primary if it's virtual (user's choice) and placed, else
+  # the baseline's primary.
+  $cur = $os | Where-Object { $_.Attached -and $_.Primary } | Select-Object -First 1
+  $setPrimary = $null
+  # Remember which Frame monitor the user made primary, so it stays primary when Vibepollo
+  # re-creates its display (resize, after a VR game). Same display no longer primary: the user
+  # switched back. (The preference lasts while the agent runs.)
+  $inst = @($map.Keys | Where-Object { $map[$_].Name -eq $cur.Name })
+  if ($cur -and $cur.Virtual -and $inst.Count) { $script:primaryInst = $inst[0]; $script:primaryName = $cur.Name }
+  elseif ($script:primaryInst -and $map.ContainsKey($script:primaryInst)) {
+    $pm = $map[$script:primaryInst]
+    if ($pm.Name -eq $script:primaryName) { $script:primaryInst = $null }
+    else { $script:primaryName = $pm.Name; $setPrimary = $pm.Name; $cur = $pm }
+  }
+  if ($setPrimary) { $anchor = $setPrimary }
+  elseif ($cur -and $cur.Virtual) {
+    if (-not $tgt.ContainsKey($cur.Name)) { return @() }  # a virtual primary we can't place yet: wait
+    $anchor = $cur.Name
+  } else {
+    $bp = $phys.Keys | Where-Object { $phys[$_].Primary } | Select-Object -First 1
+    $anchor = if ($bp) { $bp } elseif ($cur) { $cur.Name } else { $null }
+    if (-not $anchor -or -not $tgt.ContainsKey($anchor)) { return @() }
+    if (-not $cur -or $cur.Name -ne $anchor) { $setPrimary = $anchor }
+  }
+  $dx = - $tgt[$anchor][0]; $dy = - $tgt[$anchor][1]
+  $entries = @()
+  foreach ($o in @($os | Where-Object { $_.Attached -and $tgt.ContainsKey($_.Name) })) {
+    $x = $tgt[$o.Name][0] + $dx; $y = $tgt[$o.Name][1] + $dy
+    $mo = $phys.ContainsKey($o.Name) -and $modeOff[$o.Name]
+    if ($mo -or $o.X -ne $x -or $o.Y -ne $y -or $o.Name -eq $setPrimary) {
+      $f = $DM_POSITION; $e = $phys[$o.Name]
+      if ($mo) { $f = $f -bor $DM_W -bor $DM_H -bor $DM_FREQ }
+      $entries += @{ Name = $o.Name; Fields = $f; X = $x; Y = $y; W = $e.W; H = $e.H; Hz = $e.Hz; Primary = ($o.Name -eq $setPrimary) }
     }
   }
   $entries
@@ -384,26 +407,25 @@ function Handle-Pair($req, $from) {
   Log "paired '$($req.name)' ($from)"
   $script:permTodo[[string]$req.name] = (Get-Date).AddSeconds(60)
 }
+# Every "Frame monitor N" device gets $PermWanted: just after pairing, and once a minute (a
+# re-paired Frame may be named "Frame monitor 1 (2)" by Vibepollo, next to its old pairing).
+$script:permCheck = Get-Date '2000-01-01'; $script:primaryInst = $null; $script:primaryName = $null
 function Fix-Permissions {
-  if (-not $script:permTodo.Count) { return }
+  if (-not $script:permTodo.Count -and ((Get-Date) - $script:permCheck).TotalSeconds -lt 60) { return }
+  $script:permCheck = Get-Date
   $auth = Vp-Auth
+  if (-not $auth) { $script:permTodo.Clear(); return }
   try { $list = Vp Get '/api/clients/list' $null $auth } catch { return }
-  foreach ($name in @($script:permTodo.Keys)) {
-    $c = @($list.named_certs) | Where-Object { $_.name -eq $name } | Select-Object -Last 1
-    if (-not $c) {
-      if ((Get-Date) -gt $script:permTodo[$name]) { Log "permissions for '$name': device not in Vibepollo's list; gave up"; $script:permTodo.Remove($name) }
-      continue
-    }
+  foreach ($c in @($list.named_certs | Where-Object { $_.name -match '^Frame monitor \d+( \(\d+\))?$' })) {
     $want = [uint32]$c.perm -bor $PermWanted
-    if ($want -ne [uint32]$c.perm) {
-      $body = @{}
-      foreach ($pr in $c.PSObject.Properties) { if ($pr.Name -ne 'last_seen') { $body[$pr.Name] = $pr.Value } }
-      $body.perm = $want
-      try { [void](Vp Post '/api/clients/update' $body $auth); Log "permissions for '$name': launch, mouse, keyboard" }
-      catch { Log "permissions for '$name' failed: $_"; continue }
-    }
-    $script:permTodo.Remove($name)
+    if ($want -eq [uint32]$c.perm) { continue }
+    $body = @{}
+    foreach ($pr in $c.PSObject.Properties) { if ($pr.Name -ne 'last_seen') { $body[$pr.Name] = $pr.Value } }
+    $body.perm = $want
+    try { [void](Vp Post '/api/clients/update' $body $auth); Log "permissions for '$($c.name)': launch, mouse, keyboard" }
+    catch { Log "permissions for '$($c.name)' failed: $_" }
   }
+  foreach ($k in @($script:permTodo.Keys)) { if ((Get-Date) -gt $script:permTodo[$k]) { $script:permTodo.Remove($k) } }
 }
 
 # ---- the link ------------------------------------------------------------------------------

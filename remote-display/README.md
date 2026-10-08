@@ -77,6 +77,10 @@ but the system "..." button, which belongs to SteamVR).
 - **Arrange:** move the panels where you want them. About 10 seconds after you let go, Windows
   rearranges its virtual monitors to match (left/right, and above/below for stacked panels);
   your screens may blink once.
+- **Main display:** to make a virtual monitor Windows' main display, use Windows' own Settings →
+  Display → "Make this my main display". It stays the main display (also when the monitor is
+  re-made after a resize or a VR game) until you pick another one; when you close it, Windows
+  goes back to your physical one.
 - **Resize:** resize a panel; once you let go, the picture freezes for about 5 seconds while
   the PC's monitor changes size.
 - **VR games:** when a VR game starts, the panels step aside (the stream pauses, the PC keeps
