@@ -611,6 +611,18 @@ int main(int argc, char **argv) {
     if (g_o.wl && !WlInit(g_o.w, g_o.h, g_o.winW ? g_o.winW : g_o.w, g_o.winH ? g_o.winH : g_o.h)) return 1;
 
     r = gs_start_app(&server, &cfg, appId, false, true /* audio stays on the PC */, 0);
+    // Vibepollo 2.0.0: when the PC's primary monitor isn't the one Windows would put at 0,0, its
+    // first Remote Monitor attempt fails ("composed display topology did not apply") and leaves
+    // Windows' default arrangement, from which another attempt usually works. A failed attempt
+    // can leave this client owning a half-made monitor, so release it before each retry.
+    for (int attempt = 1; attempt <= 3 && r != GS_OK && gs_error && strstr(gs_error, "did not apply"); ++attempt) {
+        printf("host: \"%s\"; release and retry (%d/3)\n", gs_error, attempt);
+        server.currentGame = 0;
+        gs_start_app(&server, &cfg, 2147483502 /* Disconnect Monitor */, false, true, 0);
+        sleep(2);
+        server.currentGame = 0;
+        r = gs_start_app(&server, &cfg, appId, false, true, 0);
+    }
     if (r != GS_OK) return fprintf(stderr, "starting %s failed (%d): %s\n", g_o.app.c_str(), r, gs_error ? gs_error : ""), 1;
     printf("app: %s started at %dx%d %d fps %d kbps %s\n", g_o.app.c_str(), cfg.width, cfg.height, cfg.fps,
            cfg.bitrate, g_o.hevc ? "HEVC" : "H.264");
@@ -690,6 +702,13 @@ int main(int argc, char **argv) {
     }
     LiStopConnection();
     gs_quit_app(&server);
+    // Vibepollo keeps a Remote Monitor's virtual display after the stream ends, and with two
+    // clients its deferred cleanup can leave one behind. Release ours explicitly.
+    if (g_o.app == "Remote Monitor") {
+        server.currentGame = 0;
+        gs_start_app(&server, &cfg, 2147483502 /* Disconnect Monitor */, false, true, 0);
+        printf("host: released the Remote Monitor (%s)\n", gs_error ? gs_error : "ok");
+    }
     {
         std::lock_guard<std::mutex> l(g_mu);
         printf("\nRESULT %s %dx%d %s %d kbps, %.1f s, %llu frames shown\n", g_o.host.c_str(), g_o.w, g_o.h,

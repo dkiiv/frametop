@@ -59,5 +59,21 @@ Open:
   on the ultrawide, or a Vibepollo bug. Needs Curtis before changing drivers/settings.
 - Multiple simultaneous virtual displays (Curtis's requirement): works on the stream side now;
   blocked in practice by the layout problem above.
+- **Update 17:40 — layout handled, cleanup still flaky.** Confirmed with the Frametop dev:
+  Vibepollo doesn't remember the layout. Mechanism seen here: from Curtis's layout (ultrawide
+  primary at 0,0, 1080p below it) Vibepollo's first Remote Monitor start fails ("composed display
+  topology did not apply": it can't move the ultrawide to its origin), leaving Windows' default
+  arrangement, from which a second start works. Workarounds now in place:
+  - PC: a layout watcher (PowerShell, user-level, Startup-folder shortcut, outside the repo;
+    script + notes in ~/.local/share/ftrd on WSL, installed to C:\ProgramData\ftrd) fixes the
+    physical layout (ultrawide primary 0,0 @240 Hz, 1080p at its offset) whenever it's wrong and
+    stable for 4 s, also during sessions (tested: the stream carries on; the virtual monitor then
+    sits right of the ultrawide).
+  - ftrd-stream: on "did not apply", release + retry up to 3x (3/3 single runs OK, 1 retry each);
+    on exit, explicitly releases its Remote Monitor.
+  - Still flaky: with two clients, Vibepollo sometimes keeps one virtual monitor after both
+    released ("Deferring virtual display cleanup until the remaining managed client display
+    sessions release ownership"); repeated Disconnect doesn't clear it, a fresh start+release by
+    each identity does. Upstream-report material (needs scrubbed logs, Curtis's account).
 - Remote-monitor retention: `remote_monitor_disconnect_on_stream_end` (Vibepollo setting)
   would make the release step unnecessary.
