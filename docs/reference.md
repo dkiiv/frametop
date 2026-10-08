@@ -193,6 +193,7 @@ float/ft-float launch org.kde.dolphin # start an app (its desktop file name) flo
 float/ft-float run COMMAND [ARG...]   # the same for a command
 float/ft-float close ID               # close a window
 float/ft-float list                   # the spare outputs and what floats on them
+float/ft-float list apps              # floating windows: <output>:<ft-screens number>:<app>
 ```
 
 ## Displays off and sleep

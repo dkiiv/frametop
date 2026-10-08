@@ -11,6 +11,7 @@
   ft-float run COMMAND [ARG...]  the same for a command
   ft-float close ID            close a window
   ft-float list                the spare outputs and what floats on them
+  ft-float list apps           floating windows as <output>:<ft-screens number>:<app>
 FT_FLOAT_SOCKET names ft-floatd's socket (default frametop_float).
 """
 import json

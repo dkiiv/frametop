@@ -1050,6 +1050,8 @@ class Daemon:
             return self.capture(sender)
         if cmd == "profile" and rest:
             return self.open_profile(text.split(None, 1)[1])
+        if cmd == "list" and rest == ["apps"]:  # floating windows: <output>:<ft-screens number>:<app>
+            return "ok " + " ".join(f"{s.output}:{s.index}:{s.window.app or '-'}" for s in self.slots if s.window)
         if cmd == "list":
             return "ok " + " ".join(f"{s.output}:{s.window.id if s.window else '-'}" for s in self.slots)
         if cmd == "quit":

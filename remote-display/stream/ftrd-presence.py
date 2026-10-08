@@ -1,0 +1,170 @@
+#!/usr/bin/env python3
+"""ftrd-presence: the Frame's half of the PC link (remote-display/host/README.md).
+
+While at least one remote-display instance runs, answer the PC agent's pings with what the
+Frame shows: one entry per virtual monitor, with the stream size and where its panel floats
+around you, so the agent can arrange Windows' monitors the same way. With no instance left it
+answers "no monitors" for a few seconds and exits; no answer at all means the Frame is gone
+(asleep, crashed, out of range), and the PC agent gives the PC its own screens back.
+
+  Request  (PC -> Frame, UDP 47810):  FTRD1 PING <nonce hex>
+  Reply    (Frame -> PC):             FTRD1 <json>\\n<hex HMAC-SHA256(key, nonce + json)>
+The key is ~/.config/frametop-remote-display/link.key (the PC agent makes it; copied here
+once). Replies without a valid key are never sent.
+
+State comes from the instances' FTRD_STATE_FILEs (~/.cache/frametop-remote-display/
+stream-N.state, written by ftrd-stream), panel poses from ft-screens (@ft_screens "get N",
+"head") and which panel holds which window from ft-floatd (@frametop_float "list apps").
+"""
+import base64, hashlib, hmac, json, math, os, socket, sys, time
+
+PORT = int(os.environ.get("FTRD_PRESENCE_PORT", "47810"))
+CACHE = os.path.expanduser("~/.cache/frametop-remote-display")
+KEYFILE = os.path.expanduser("~/.config/frametop-remote-display/link.key")
+LINGER = 8.0  # seconds of "no monitors" answers after the last instance stops
+
+
+def log(*a):
+    print(time.strftime("%H:%M:%S"), *a, flush=True)
+
+
+def ask(name, text, timeout=0.3):
+    """One request on an abstract unix datagram socket (ft-screens, ft-floatd)."""
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    try:
+        s.bind("")  # autobind, for the reply
+        s.settimeout(timeout)
+        s.sendto(text.encode(), "\0" + name)
+        return s.recv(65536).decode(errors="replace")
+    except OSError:
+        return ""
+    finally:
+        s.close()
+
+
+def cert_sha256(keys):
+    """SHA-256 of the client certificate (DER), which Vibepollo stores for the pairing."""
+    try:
+        pem = open(os.path.join(keys, "client.pem")).read()
+    except OSError:
+        return ""
+    body = "".join(l for l in pem.splitlines() if l and not l.startswith("-----"))
+    return hashlib.sha256(base64.b64decode(body)).hexdigest()
+
+
+def instances():
+    out = []
+    for f in sorted(os.listdir(CACHE)) if os.path.isdir(CACHE) else []:
+        if not (f.startswith("stream-") and f.endswith(".state")):
+            continue
+        try:
+            st = json.load(open(os.path.join(CACHE, f)))
+            os.kill(int(st["pid"]), 0)
+        except (OSError, ValueError, KeyError):
+            continue
+        st["instance"] = f[len("stream-"):-len(".state")]
+        out.append(st)
+    return out
+
+
+def panels():
+    """app id -> ft-screens number of the panel it floats on."""
+    reply = ask("frametop_float", "list apps")
+    found = {}
+    if reply.startswith("ok"):
+        for item in reply.split()[1:]:
+            parts = item.split(":")
+            if len(parts) >= 3 and parts[1].isdigit():
+                found[":".join(parts[2:])] = int(parts[1])
+    return found
+
+
+def pose(n):
+    """(x, y, z) of panel n's centre in the room, or None."""
+    r = ask("ft_screens", f"get {n}").split()
+    if len(r) < 4 or r[0] != "ok":
+        return None
+    try:
+        return float(r[1]), float(r[2]), float(r[3])
+    except ValueError:
+        return None
+
+
+def head():
+    r = ask("ft_screens", "head").split()
+    if len(r) >= 5 and r[0] == "ok":
+        try:
+            return float(r[1]), float(r[2]), float(r[3]), float(r[4])
+        except ValueError:
+            pass
+    return None
+
+
+def snapshot():
+    insts = instances()
+    where = panels() if insts else {}
+    h = head() if insts else None
+    mons = []
+    for st in insts:
+        m = {"instance": st["instance"], "cert_sha256": cert_sha256(st.get("keys", "")), "app": st.get("app", ""),
+             "w": st.get("w", 0), "h": st.get("h", 0), "suspended": bool(st.get("suspended"))}
+        n = where.get(st.get("wl_id", ""))
+        p = pose(n) if n else None
+        if p and h:
+            dx, dy, dz = p[0] - h[0], p[1] - h[1], p[2] - h[2]
+            # Azimuth: degrees to the right of where you face (ft-screens' head yaw is in degrees,
+            # positive when turned left; forward is -z); elevation: degrees up.
+            az = math.degrees(math.atan2(dx, -dz)) + h[3]
+            az = (az + 180) % 360 - 180
+            el = math.degrees(math.atan2(dy, math.hypot(dx, dz)))
+            m.update(panel=n, az=round(az, 1), el=round(el, 1))
+        mons.append(m)
+    return mons
+
+
+def main():
+    try:
+        key = open(KEYFILE, "rb").read().strip()
+    except OSError:
+        sys.exit(f"ftrd-presence: no key at {KEYFILE} (see remote-display/host/README.md)")
+    if len(key) < 32:
+        sys.exit("ftrd-presence: key too short")
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        s.bind(("0.0.0.0", PORT))
+    except OSError as e:
+        sys.exit(f"ftrd-presence: port {PORT}: {e} (already running?)")
+    s.settimeout(1.0)
+    log(f"listening on UDP {PORT}")
+    last_seen = time.monotonic()
+    cache, cache_t = [], 0.0
+    while True:
+        now = time.monotonic()
+        if now - cache_t > 0.5:
+            cache, cache_t = snapshot(), now
+            if cache:
+                last_seen = now
+        if not cache and now - last_seen > LINGER:
+            log("no instances left; exiting")
+            return
+        try:
+            data, peer = s.recvfrom(512)
+        except socket.timeout:
+            continue
+        parts = data.decode(errors="replace").split()
+        if len(parts) != 3 or parts[0] != "FTRD1" or parts[1] != "PING":
+            continue
+        try:
+            nonce = bytes.fromhex(parts[2])
+        except ValueError:
+            continue
+        if not 8 <= len(nonce) <= 64:
+            continue
+        body = json.dumps({"v": 1, "t": time.time(), "monitors": cache}, separators=(",", ":"))
+        mac = hmac.new(key, nonce + body.encode(), hashlib.sha256).hexdigest()
+        s.sendto(f"FTRD1 {body}\n{mac}".encode(), peer)
+
+
+if __name__ == "__main__":
+    main()

@@ -141,6 +141,21 @@ struct GameWatch {
     bool Yield() const { return known && game && hide; }
 } g_game;
 
+// State for ftrd-presence (the PC-side link, see remote-display/host/README.md): what this
+// instance shows, as JSON in $FTRD_STATE_FILE, rewritten on every change.
+void WriteState(bool suspended) {
+    const char *path = getenv("FTRD_STATE_FILE");
+    if (!path) return;
+    const std::string tmp = std::string(path) + ".tmp";
+    FILE *f = fopen(tmp.c_str(), "w");
+    if (!f) return;
+    fprintf(f, "{\"pid\": %d, \"app\": \"%s\", \"keys\": \"%s\", \"wl_id\": \"%s\", \"w\": %d, \"h\": %d, \"window\": %s, \"suspended\": %s}\n",
+            int(getpid()), g_o.app.c_str(), g_o.keys.c_str(), g_o.wl ? g_o.wlId.c_str() : "", g_o.w, g_o.h,
+            g_o.wl ? "true" : "false", suspended ? "true" : "false");
+    fclose(f);
+    rename(tmp.c_str(), path);
+}
+
 }  // namespace
 #include "wlwin.h"
 namespace {
@@ -683,6 +698,13 @@ int main(int argc, char **argv) {
     // first Remote Monitor attempt fails ("composed display topology did not apply") and leaves
     // Windows' default arrangement, from which another attempt usually works. A failed attempt
     // can leave this client owning a half-made monitor, so release it before each retry.
+    // Another client's start or resize is in progress on the host: wait for it.
+    for (int attempt = 1; attempt <= 10 && r != GS_OK && gs_error && strstr(gs_error, "still running"); ++attempt) {
+        printf("host: busy with another stream; retry %d/10 in 2 s\n", attempt);
+        sleep(2);
+        server.currentGame = 0;
+        r = gs_start_app(&server, &cfg, appId, false, true, 0);
+    }
     // "not yet capture-ready": a monitor of this client's is stuck at another size. Same cure.
     for (int attempt = 1; attempt <= 3 && r != GS_OK && gs_error &&
                           (strstr(gs_error, "did not apply") || strstr(gs_error, "not yet capture-ready"));
@@ -700,6 +722,7 @@ int main(int argc, char **argv) {
     return 0;
   };
     if (launch()) return 1;
+    WriteState(false);
 
     DECODER_RENDERER_CALLBACKS dr;
     LiInitializeVideoCallbacks(&dr);
@@ -783,6 +806,7 @@ int main(int argc, char **argv) {
 #endif
                 if (g_o.wl) WlReleaseKeys(), PtrLeave(nullptr, nullptr, 0, nullptr);
                 suspended = true, suspendedAt = now;
+                WriteState(true);
                 printf("game: suspended in %.2f s\n", (MonoNs() - s0) / 1e9);
             } else if (!g_game.Yield() && suspended) {
                 const int64_t s0 = MonoNs();
@@ -806,6 +830,7 @@ int main(int argc, char **argv) {
                 if (g_o.vr && g_kbButton != vr::k_ulOverlayHandleInvalid) vr::VROverlay()->ShowOverlay(g_kbButton);
 #endif
                 suspended = false;
+                WriteState(false);
                 printf("game: resumed in %.1f s\n", (MonoNs() - s0) / 1e9);
             }
             if (suspended) continue;
@@ -831,6 +856,7 @@ int main(int argc, char **argv) {
                 r = LiStartConnection(&server.serverInfo, &cfg, &cl, &dr, nullptr, nullptr, 0, nullptr, 0);
                 if (r != 0) { fprintf(stderr, "LiStartConnection failed (%d)\n", r); g_termError = true; break; }
                 printf("resize: reconnected in %.1f s\n", (MonoNs() - r0) / 1e9);
+                WriteState(false);
             }
         }
     }
@@ -846,6 +872,7 @@ int main(int argc, char **argv) {
         WlReleaseKeys();
         PtrLeave(nullptr, nullptr, 0, nullptr);  // releases the PC's mouse buttons
     }
+    if (const char *sf = getenv("FTRD_STATE_FILE")) unlink(sf);
     if (!suspended) LiStopConnection();
     gs_quit_app(&server);
     // Vibepollo keeps a Remote Monitor's virtual display after the stream ends, and with two

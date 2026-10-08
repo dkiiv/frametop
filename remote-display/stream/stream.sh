@@ -11,6 +11,7 @@
 #                                               the panel resizes the monitor
 #   stream.sh float-desktop                     the PC's own desktop (its physical monitors), floating
 #   stream.sh cleanup                           clear virtual monitors Vibepollo kept after release
+#   stream.sh presence                          the PC link's state (what the PC agent gets)
 #   stream.sh install-desktop                   the desktop files ft-float launch needs
 # Identity N: keys in ~/.config/frametop-remote-display (N=1) or .../N. Vibepollo gives each paired
 # identity one virtual monitor. Instance "desktop" (float-desktop) uses identity 1.
@@ -42,8 +43,12 @@ case ${1:-status} in
       export WAYLAND_DISPLAY=${FTRD_WAYLAND:-/run/user/$(id -u)/frametop/wayland-0}
       [ -S "$WAYLAND_DISPLAY" ] || { echo "no Frametop desktop socket at $WAYLAND_DISPLAY"; exit 1; } ;;
     esac
-    setsid nohup "$bin" --keys "$(keys "$n")" "$@" >"$log" 2>&1 < /dev/null &
+    FTRD_STATE_FILE=$dir/stream-$n.state setsid nohup "$bin" --keys "$(keys "$n")" "$@" >"$log" 2>&1 < /dev/null &
     echo $! > "$dir/stream-$n.pid"
+    # The PC link (remote-display/host): answers the PC agent while any instance runs.
+    if [ -f "$HOME/.config/frametop-remote-display/link.key" ] && ! pgrep -f ftrd-presence.py >/dev/null; then
+      setsid nohup python3 "$here/ftrd-presence.py" >"$dir/presence.log" 2>&1 < /dev/null &
+    fi
     for _ in $(seq 1 80); do
       sleep 0.25
       grep -q "connection started" "$log" && { echo "instance $n on (log: $log)"; exit 0; }
@@ -82,6 +87,10 @@ case ${1:-status} in
     exec "$HOME/dev/frametop/float/ft-float" launch "org.frametop.RemoteMonitor${2:-1}" ;;
   float-desktop)
     exec "$HOME/dev/frametop/float/ft-float" launch org.frametop.RemoteDisplay ;;
+  presence)
+    if pgrep -f ftrd-presence.py >/dev/null; then echo "ftrd-presence running"; else echo "ftrd-presence not running"; fi
+    tail -3 "$dir/presence.log" 2>/dev/null
+    python3 -c "import importlib.util as u; s=u.spec_from_file_location('p', '$here/ftrd-presence.py'); m=u.module_from_spec(s); s.loader.exec_module(m); import json; print(json.dumps(m.snapshot(), indent=1))" ;;
   cleanup)  # Vibepollo 2.0.0 sometimes keeps a released virtual monitor (its ownership
     # bookkeeping); a short start + release by each paired identity clears it. Monitors flash.
     [ -z "$(for n in $(instances); do pidof_i "$n"; done)" ] || { echo "stop the streams first (stream.sh off)"; exit 1; }
