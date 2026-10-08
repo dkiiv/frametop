@@ -11,57 +11,43 @@ Status: a proof of concept on the dkiiv/frametop fork (branch `remote-display-po
 not part of Frametop. It works day to day on one setup (RTX 5080, Vibepollo 2.0.0); expect rough
 edges elsewhere.
 
-## What you need
+You need a Steam Frame and a Windows 10/11 PC with a GPU that can encode HEVC (NVIDIA, AMD or
+Intel), on the same network. Valve's USB Wi-Fi adapter for the PC gives the lowest latency (about
+3 ms here), but home Wi-Fi works.
 
-- A Steam Frame with Frametop from this fork's branch. Install it the way the main README's
-  [Install on the headset](../README.md#install-on-the-headset) describes (Launch a program →
-  Desktop, then Konsole), but clone this branch instead of running get.sh:
-  ```
-  git clone -b remote-display-poc-handoff https://github.com/dkiiv/frametop.git ~/frametop
-  cd ~/frametop && ./install.sh
-  ```
-  The branch is Frametop plus Remote PC (and two small Frametop changes it relies on: `ft-float
-  list apps` and the grab-bar hit-box fix). Already have Frametop in `~/frametop`? Switch it:
-  `cd ~/frametop && git remote add dkiiv https://github.com/dkiiv/frametop.git && git fetch dkiiv
-  && git checkout -b remote-display dkiiv/remote-display-poc-handoff && ./install.sh`, then
-  restart the Frametop desktop.
-- A Windows 10/11 PC with a GPU that can encode HEVC (NVIDIA, AMD or Intel), on the same network
-  as the Frame. Valve's USB Wi-Fi adapter for the PC gives the lowest latency (about 3 ms here),
-  but home Wi-Fi works.
-- [Vibepollo](https://github.com/Nonary/Vibepollo/releases) 2.0.0 on the PC (a Sunshine fork
-  that makes a virtual monitor per paired device). It replaces Sunshine if you have it.
+## Set it up (once): one line on each device
 
-## Set it up (once)
+### 1. On the PC (a few minutes)
 
-### On the PC
-
-1. Install Vibepollo (`VibepolloSetup-v2.0.0.exe`). Open https://localhost:47990 and create
-   the web UI login it asks for.
-2. Optional but recommended: the layout keeper. In PowerShell (as yourself, no admin):
-   ```
-   $f = "$env:TEMP\ftrd-host.ps1"
-   irm https://raw.githubusercontent.com/dkiiv/frametop/remote-display-poc-handoff/remote-display/host/ftrd-host.ps1 -OutFile $f
-   powershell -ExecutionPolicy Bypass -File $f -Install
-   ```
-   With your physical monitors arranged as you like them. It saves that layout, keeps it (Vibepollo
-   2.0.0 shuffles it whenever a virtual monitor comes or goes) and places the virtual monitors to
-   the right in the panels' order. It starts at every logon. Details: [host/README.md](host/README.md).
-
-### On the Frame
-
-In the Frametop desktop, open Konsole (or SSH in) and run:
+Open PowerShell (Start → type `powershell` → Enter) and paste:
 ```
-~/frametop/remote-display/stream/stream.sh setup
+irm https://raw.githubusercontent.com/dkiiv/frametop/remote-display-poc-handoff/remote-display/host/install.ps1 | iex
 ```
-It finds your PC by itself (Vibepollo announces itself on the network; with Valve's USB adapter
-the Frame sees it directly), so there's no address to type, and sets up 2 monitors (`setup 3` for
-3, up to 4). If it finds several PCs it asks which one. The first run builds the client (a few
-minutes). Then, for each monitor, it shows a PIN: on the PC, open https://localhost:47990 → PIN,
-enter it, and name the device as it says ("Frame monitor 1", ...).
+Click **Yes** when Windows asks. It installs [Vibepollo](https://github.com/Nonary/Vibepollo)
+2.0.0 (the streaming host: a Sunshine fork that makes a virtual monitor per device; it replaces
+Sunshine if you have it), and a small Remote PC helper that pairs the Frame for you and keeps
+your monitor layout in order. It shows the login it made for Vibepollo's own settings page; you
+rarely need it (`ftrd-host.ps1 -ShowLogin` shows it again). Arrange your physical monitors the
+way you like them before you run it: that's the layout the helper keeps.
 
-Vibepollo gives full rights only to the first device it pairs. For monitors 2 and up, open the
-web UI → Clients, and give each "Frame monitor N" the Launch and input (mouse, keyboard)
-permissions.
+### 2. On the Frame (about 15 minutes, mostly downloading)
+
+In the headset: Launch a program → Desktop, then the application menu → System → Konsole, and
+type (a Bluetooth keyboard helps; the on-screen keyboard works too):
+```
+curl -fsSL https://raw.githubusercontent.com/dkiiv/frametop/remote-display-poc-handoff/remote-display/get.sh | bash
+```
+It installs Frametop (the multi-screen desktop Remote PC runs in) with Remote PC included. Press
+Enter at its questions to take the defaults; at the end, let it restart SteamVR (or restart the
+headset). It's the same installer as Frametop's own, see the main [README](../README.md) for what
+the questions mean. If something fails, run the same line again: it picks up where it stopped.
+
+### 3. In the headset
+
+Launch a program → Desktop, then Steam button → **+** → **Remote PC**. The first time, a window
+opens, finds your PC and pairs two monitors with it; nothing to type. Within 30 minutes of step 1
+the PC agrees by itself; after that, the PC asks first (a window on its screen: click Yes; or run
+`ftrd-host.ps1 -AllowPairing` there). Then your monitors open.
 
 To type, map a controller button to Frametop's keyboard in Frametop Input Settings (any button
 but the system "..." button, which belongs to SteamVR).
@@ -81,25 +67,35 @@ but the system "..." button, which belongs to SteamVR).
   move to your physical monitors.
 
 Moving windows from your physical monitors onto a virtual one: Win+Shift+Left/Right, or drag.
+After a reboot of either device nothing needs redoing: open Remote PC again (the PC has to be on
+and logged in).
 
 ## When something's off
 
+- **"Can't find your PC":** Remote PC looks for the PC you paired every time it opens (where it
+  was last time, on the Frame's own hotspot, by network discovery, then by a quick scan), so a
+  new address doesn't matter. This means the PC is off or asleep, Vibepollo isn't running, or the
+  two aren't on the same network.
+- **Your physical monitors are rearranged or at a lower refresh rate:** Vibepollo 2.0.0 shuffles
+  them when virtual monitors come and go; the helper puts them back within seconds. After
+  changing your layout on purpose: `ftrd-host.ps1 -SaveBaseline`.
 - **A virtual monitor stays in Windows after you closed everything** (Vibepollo 2.0.0 sometimes
-  keeps one): on the Frame, `stream.sh cleanup` (your monitors flash a few times). Or let the
-  layout keeper do it: create a Vibepollo API token (web UI → API tokens, scope
-  `POST /api/display/terminate_virtual`) and save it as `%LOCALAPPDATA%\ftrd\vibepollo.token`.
-- **Your physical monitors are rearranged or at a lower refresh rate:** the layout keeper fixes
-  that within seconds; without it, fix it in Display Settings. `ftrd-host.ps1 -Restore` puts the
-  saved layout back now; re-save with `-SaveBaseline` after changing it on purpose.
+  keeps one): the helper removes it after 30 seconds.
 - **Physical monitors dark:** Win+P → Extend. (This happened with Vibepollo's "Desktop" app, which
-  makes its virtual screen the only display; Remote PC refuses to start that app.)
-- **"Can't find your PC":** Remote PC looks for the PC you paired by its Vibepollo id every time
-  it opens (where it was last time, on the Frame's own hotspot, by mDNS, then by a quick scan of
-  the network), so a new address doesn't matter. This means the PC is off or asleep, Vibepollo
-  isn't running, or the two aren't on the same network. If your network blocks discovery and
-  scanning, give the address once: `stream.sh setup ADDRESS`.
-- **A panel stays dark:** `stream.sh status` and `stream.sh log N` on the Frame show what the
-  stream is doing; `ftrd-host.ps1 -Status` on the PC shows the displays and what the Frame reports.
+  makes its virtual screen the only display; Remote PC never starts that app.)
+- **A panel stays dark:** `~/frametop/remote-display/stream/stream.sh status` and `stream.sh log N`
+  on the Frame show what the stream is doing; on the PC,
+  `%LOCALAPPDATA%\ftrd\ftrd-host.ps1 -Status` shows the displays and what the Frame reports, and
+  `%LOCALAPPDATA%\ftrd\ftrd-host.log` what the helper did.
+- **Set up again** (another PC, more monitors): `stream.sh setup` in Konsole (`setup 3` for three
+  monitors, up to 4; `setup ADDRESS` if your network blocks discovery).
+
+## Uninstall
+
+- **PC:** in PowerShell, `& "$env:LOCALAPPDATA\ftrd\ftrd-host.ps1" -Uninstall` (it asks whether
+  to remove Vibepollo too).
+- **Frame:** Frametop's uninstaller removes Remote PC with it: see [Uninstall](../README.md#uninstall)
+  in the main README (`~/frametop/uninstall.sh`).
 
 ## Limits (for now)
 
@@ -108,17 +104,20 @@ Moving windows from your physical monitors onto a virtual one: Win+Shift+Left/Ri
 - Frametop's keyboard doesn't open by itself when you click a text field on the PC; use the
   mapped button.
 - One paired device per virtual monitor, up to 4 (Vibepollo).
-- Vibepollo 2.0.0 shuffles the physical monitors at each virtual monitor start/stop (the layout
-  keeper puts them back) and its first start sometimes fails and is retried, so opening takes a
-  few seconds and your screens blink.
+- Vibepollo 2.0.0 shuffles the physical monitors at each virtual monitor start/stop (the helper
+  puts them back) and its first start sometimes fails and is retried, so opening takes a few
+  seconds and your screens blink.
 
 ## How it fits together
 
 - `stream/ftrd-stream`: the client (moonlight-common-c, fetched at build time): decodes on the
   Frame's hardware decoder, hands frames to Frametop's compositor as a Wayland window (zero copy),
-  sends pointer and keys back. `stream/stream.sh` starts/stops instances, pairs, installs the
-  menu entry. `stream/ftrd-presence.py` tells the PC where the panels are, signed with the
-  pairing key.
-- `host/ftrd-host.ps1`: the PC side (layout keeper).
+  sends pointer and keys back. `stream/stream.sh` starts/stops instances, sets up and pairs,
+  installs the menu entry. `stream/ftrd-find-pc.py` finds the paired PC. `stream/ftrd-presence.py`
+  answers the PC helper: the panels' positions (signed with the pairing key) and, during setup,
+  the pairing PIN.
+- `host/ftrd-host.ps1`: the PC side (install, pairing, layout keeper); `host/install.ps1` is the
+  one-liner's bootstrap. Details: [host/README.md](host/README.md).
+- `get.sh`: the Frame's one-liner (clone this branch, run install.sh, which builds Remote PC).
 - `probe/`: the decoder survey from the start of the project; `stream/diag/`: investigation tools.
 - The project's history, measurements and decisions: `docs/handoff/` (milestones and dated logs).

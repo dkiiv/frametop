@@ -24,7 +24,8 @@ Usage (Windows PowerShell 5.1, as the logged-in user):
                                   at every logon; pairing open for 30 minutes
   ftrd-host.ps1 -AllowPairing     let a Frame pair without asking, for the next 15 minutes
   ftrd-host.ps1 -ShowLogin        the Vibepollo web page login -Install made
-  ftrd-host.ps1 -Uninstall        stop it and remove it from logon (Vibepollo stays)
+  ftrd-host.ps1 -Uninstall        remove this helper and its data; asks whether to remove Vibepollo
+                                  too (-RemoveVibepollo: without asking; one UAC prompt)
   ftrd-host.ps1 -SaveBaseline     save the current physical layout as the one to keep
   ftrd-host.ps1 -Status           displays, baseline, the Frame's answer
   ftrd-host.ps1 -Restore          physical monitors back to the baseline now
@@ -33,7 +34,7 @@ Data folder: %LOCALAPPDATA%\ftrd (ftrd-host.ps1, baseline.json, frame.txt, vibep
 vibepollo-login.dpapi (encrypted for this Windows user), pair-until, ftrd-host.log). The Frame's
 answers are signed with its Vibepollo pairing key; nothing to copy.
 #>
-param([switch]$Install, [switch]$AllowPairing, [switch]$ShowLogin, [switch]$Uninstall, [switch]$SaveBaseline, [switch]$Status, [switch]$Restore, [switch]$Run,
+param([switch]$Install, [switch]$AllowPairing, [switch]$ShowLogin, [switch]$Uninstall, [switch]$RemoveVibepollo, [switch]$SaveBaseline, [switch]$Status, [switch]$Restore, [switch]$Run,
       [string[]]$Frame = @(), [int]$Port = 47810,
       [string]$VibepolloConfig = 'C:\Program Files\Sunshine\config')
 $ErrorActionPreference = 'Continue'
@@ -296,13 +297,26 @@ function Read-Secret($name) {
   $f = Join-Path $Data $name
   if (-not (Test-Path $f)) { return $null }
   try {
-    $ss = Get-Content $f -Raw | ConvertTo-SecureString
+    $ss = (Get-Content $f -Raw).Trim() | ConvertTo-SecureString
     [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($ss))
   } catch { $null }
 }
+# Vibepollo's web API has a self-signed certificate: accept that for localhost only. Compiled,
+# because a PowerShell scriptblock callback fails when .NET calls it on another thread.
+Add-Type @'
+using System.Net;
+public static class FtrdTls {
+  public static void TrustLoopback() {
+    ServicePointManager.ServerCertificateValidationCallback = (sender, cert, chain, errors) => {
+      var req = sender as HttpWebRequest;
+      return errors == System.Net.Security.SslPolicyErrors.None || (req != null && req.RequestUri.IsLoopback);
+    };
+  }
+}
+'@
 function Vp($method, $path, $body, $auth) {
   [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-  [Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }  # localhost, self-signed
+  [FtrdTls]::TrustLoopback()
   $p = @{ Method = $method; Uri = "$VpUrl$path"; TimeoutSec = 20; UseBasicParsing = $true }
   if ($auth) { $p.Headers = @{ Authorization = $auth } }
   if ($null -ne $body) { $p.ContentType = 'application/json'; $p.Body = (ConvertTo-Json -InputObject $body -Depth 10 -Compress) }
@@ -419,7 +433,10 @@ function Ask-Frame {
       $body = $reply.Substring(6, $nl - 6); $tail = $reply.Substring($nl + 1).Trim().Split(' ')
       if ($tail.Count -ne 2) { continue }
       $cert = $script:certObj[$tail[0]]
-      if (-not $cert) { Log "answer from $($ep.Address) signed by a device Vibepollo hasn't paired; ignored"; continue }
+      if (-not $cert) {
+        if (((Get-Date) - $script:unpairedLogged).TotalMinutes -ge 10) { $script:unpairedLogged = Get-Date; Log "answer from $($ep.Address) signed by a device Vibepollo hasn't paired (yet); ignored" }
+        continue
+      }
       $sig = New-Object byte[] ($tail[1].Length / 2)
       for ($i = 0; $i -lt $sig.Length; $i++) { $sig[$i] = [Convert]::ToByte($tail[1].Substring(2 * $i, 2), 16) }
       $ok = $false
@@ -436,7 +453,7 @@ function Ask-Frame {
   } finally { $u.Close() }
   $null
 }
-$script:lastFound = Get-Date '2000-01-01'
+$script:lastFound = Get-Date '2000-01-01'; $script:unpairedLogged = Get-Date '2000-01-01'
 
 # ---- commands ------------------------------------------------------------------------------
 if ($Install) {
@@ -508,7 +525,38 @@ if ($ShowLogin) { $l = Read-Secret 'vibepollo-login.dpapi'; if ($l) { $u, $pw = 
 if ($Uninstall) {
   Remove-Item (Join-Path ([Environment]::GetFolderPath('Startup')) 'ftrd-host.lnk') -ErrorAction SilentlyContinue
   Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -ne $PID -and $_.Name -eq 'powershell.exe' -and $_.CommandLine -like '*ftrd-host.ps1*-Run*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
-  Log "uninstalled (agent stopped, Startup entry removed; $Data left in place)"
+  Write-Host 'Remote PC helper stopped and removed from logon.'
+  $rm = [bool]$RemoveVibepollo
+  if (-not $rm -and (Get-Service ApolloService -ErrorAction SilentlyContinue)) {
+    $rm = (Read-Host 'Remove Vibepollo too (with its pairings and settings)? [y/N]') -match '^[yY]'
+  }
+  if ($rm) {
+    $script = Join-Path $env:TEMP 'ftrd-remove-vibepollo.ps1'
+    Set-Content $script @'
+$ErrorActionPreference = 'Continue'
+Stop-Service ApolloService -Force -ErrorAction SilentlyContinue
+$keys = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*', 'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+foreach ($e in Get-ItemProperty $keys -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -eq 'Vibepollo' -and $_.UninstallString -match 'MsiExec' }) {
+  $code = [regex]::Match($e.UninstallString, '\{[0-9A-Fa-f-]+\}').Value
+  if ($code) { Start-Process msiexec.exe -ArgumentList '/x', $code, '/qn', '/norestart' -Wait }
+}
+if (Test-Path 'C:\Program Files\Sunshine\uninstall.exe') { Start-Process 'C:\Program Files\Sunshine\uninstall.exe' -ArgumentList '/S', '_?=C:\Program Files\Sunshine' -Wait }
+foreach ($d in Get-PnpDevice -Class Display -ErrorAction SilentlyContinue | Where-Object { $_.FriendlyName -match 'SudoMaker|Sunshine Virtual' }) {
+  $inf = (Get-PnpDeviceProperty -InstanceId $d.InstanceId -KeyName DEVPKEY_Device_DriverInfPath -ErrorAction SilentlyContinue).Data
+  & pnputil /remove-device "$($d.InstanceId)" | Out-Null
+  if ($inf -like 'oem*.inf') { & pnputil /delete-driver $inf /uninstall /force | Out-Null }
+}
+Remove-Item -Recurse -Force 'C:\Program Files\Sunshine' -ErrorAction SilentlyContinue
+'@
+    Write-Host 'Removing Vibepollo: click Yes in the Windows prompt...'
+    $pr = Start-Process powershell.exe -Verb RunAs -Wait -PassThru -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $script
+    Remove-Item $script -ErrorAction SilentlyContinue
+    Remove-Item -Recurse -Force (Join-Path $env:APPDATA 'Sunshine') -ErrorAction SilentlyContinue
+    if (Get-Service ApolloService -ErrorAction SilentlyContinue) { Write-Host 'Vibepollo is still installed (the prompt was declined?).' } else { Write-Host 'Vibepollo removed.' }
+  }
+  Set-Location $env:TEMP
+  Remove-Item -Recurse -Force $Data -ErrorAction SilentlyContinue
+  Write-Host "Removed $Data. Your monitors stay as they are."
   exit 0
 }
 if ($SaveBaseline) { Save-Baseline; exit 0 }

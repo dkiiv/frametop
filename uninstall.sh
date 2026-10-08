@@ -106,7 +106,9 @@ main() {
   # Step 1: what makes Frametop start. Nothing here stops a running program.
   [ -f "$override" ] && grep -q 'Frametop' "$override" || override=
   units=("$HOME"/.config/systemd/user/frametop-*.service)
-  for f in ft-input-settings ft-display-settings ft-layout-reset ft-screens-toggle ft-remote-settings ft-gazeprobe; do
+  for f in ft-input-settings ft-display-settings ft-layout-reset ft-screens-toggle ft-remote-settings ft-gazeprobe \
+           org.frametop.RemotePC org.frametop.RemoteMonitor1 org.frametop.RemoteMonitor2 org.frametop.RemoteMonitor3 \
+           org.frametop.RemoteMonitor4 org.frametop.RemoteDisplay; do  # (the last six: Remote PC, this fork)
     [ -e "$apps/$f.desktop" ] && entries+=("$apps/$f.desktop")
   done
   [ -e "$apps/frametop-handrec.desktop" ] && entries+=("$apps/frametop-handrec.desktop")
@@ -201,15 +203,15 @@ main() {
 
   # Rebuilt by the desktop at each start, so nothing to keep.
   run rm -rf "$HOME/.local/share/frametop/apps" "$HOME/.local/share/kwin/decorations/kwin4_decoration_qml_frametop" \
-    "$HOME/.cache/frametop"
+    "$HOME/.cache/frametop" "$HOME/.cache/frametop-remote-display"
 
   local settings=("$HOME"/.config/frametop.conf* "$HOME"/.config/frametop-*.json* "$HOME/.config/frametop-remote"
-                  "$HOME/.config/frametop" "$HOME/.local/state/frametop")
+                  "$HOME/.config/frametop" "$HOME/.local/state/frametop" "$HOME/.config/frametop-remote-display")
   local kept=()
   for f in "${settings[@]}"; do [ -e "$f" ] && kept+=("$f"); done
   if [ ${#kept[@]} -gt 0 ]; then
     echo "Your settings: the screen layout and profiles, button maps, gaze calibration, the remote"
-    echo "desktop password, and the Frametop desktop's own Plasma setup (${kept[*]/#$HOME/\~})."
+    echo "desktop password, Remote PC's pairings, and the Frametop desktop's own Plasma setup (${kept[*]/#$HOME/\~})."
     ask "Delete your settings too? Keep them to pick up where you left off if you reinstall." n &&
       run rm -rf "${kept[@]}"
   fi
