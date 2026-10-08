@@ -4,7 +4,8 @@
 While at least one remote-display instance runs, answer the PC agent's queries with what the
 Frame shows: one entry per virtual monitor, with the stream size and where its panel floats
 around you, so the agent can arrange Windows' virtual monitors the same way (right of the
-physical ones). With no instance left it answers "no monitors" for a few seconds and exits.
+physical ones). With no instance left it answers "no monitors" for 20 s and exits; if the PC says
+a virtual monitor stayed ("FTRD2 PING <nonce> leftover"), it runs stream.sh cleanup first.
 
   Request  (PC -> Frame, UDP 47810):  FTRD2 PING <nonce hex>
   Reply    (Frame -> PC):             FTRD2 <json>\\n<cert sha256 hex> <signature hex>
@@ -27,7 +28,8 @@ import base64, hashlib, json, math, os, socket, subprocess, sys, time
 PORT = int(os.environ.get("FTRD_PRESENCE_PORT", "47810"))
 CACHE = os.path.expanduser("~/.cache/frametop-remote-display")
 KEYDIR = os.path.expanduser("~/.config/frametop-remote-display")
-LINGER = 8.0  # seconds of "no monitors" answers after the last instance stops
+HERE = os.path.dirname(os.path.realpath(__file__))
+LINGER = 20.0  # seconds of "no monitors" answers after the last instance stops
 
 
 def log(*a):
@@ -168,10 +170,12 @@ def main():
     log(f"listening on UDP {PORT}")
     last_seen = time.monotonic()
     cache, cache_t = [], 0.0
+    had, cleaned = False, False  # had instances this run; cleanup already started
     while True:
         now = time.monotonic()
         if now - cache_t > 0.5:
             cache, cache_t = snapshot(), now
+            had = had or bool(cache)
             if cache or pairing():
                 last_seen = now
         if not cache and now - last_seen > LINGER:
@@ -182,8 +186,16 @@ def main():
         except socket.timeout:
             continue
         parts = data.decode(errors="replace").split()
-        if len(parts) != 3 or parts[0] != "FTRD2" or parts[1] != "PING":
+        if len(parts) not in (3, 4) or parts[0] != "FTRD2" or parts[1] != "PING":
             continue
+        # "leftover": all our monitors are closed, but the PC still has a virtual one (Vibepollo
+        # 2.0.0 loses track of one closed while another was open). Release each identity once
+        # (stream.sh cleanup: a short start + release each; the PC's screens blink).
+        if len(parts) == 4 and parts[3] == "leftover" and had and not cache and not cleaned:
+            cleaned = True
+            log("PC reports a leftover virtual monitor; stream.sh cleanup")
+            subprocess.Popen([os.path.join(HERE, "stream.sh"), "cleanup"], stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL, start_new_session=True)
         try:
             nonce = bytes.fromhex(parts[2])
         except ValueError:

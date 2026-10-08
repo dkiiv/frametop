@@ -372,15 +372,6 @@ function Vp-Auth {
 
 # Leftover virtual monitors (Vibepollo 2.0.0 sometimes keeps one after its stream ended): ask
 # Vibepollo to remove them once the Frame has said "no monitors" for 30 s.
-# A virtual monitor still attached 30 s after the Frame closed all of them (Vibepollo 2.0.0
-# sometimes keeps one). Only noted: Vibepollo's /api/display/terminate_virtual removes it but
-# also shuts its virtual display driver down for good ("terminal driver and helper watchdog
-# shutdown"): every Remote Monitor after it failed with "The composed display topology did not
-# apply" until ApolloService was restarted. The Frame's stream.sh cleanup releases it gently.
-function Terminate-Virtual {
-  Log 'leftover virtual monitor after the Frame closed all of them; on the Frame, stream.sh cleanup releases it'
-}
-
 # Pairing. A Frame being set up answers our pings with FTRD2-PAIR {name, pin}; that's the PIN its
 # pairing request to Vibepollo waits for. Approved without asking while pair-until is in the
 # future (-Install, -AllowPairing), else after a Yes on screen. Then the device gets $PermWanted.
@@ -449,7 +440,7 @@ function Broadcast-Targets {
 }
 function Ask-Frame {
   $nonce = New-Object byte[] 16; [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($nonce)
-  $msg = [Text.Encoding]::ASCII.GetBytes('FTRD2 PING ' + [BitConverter]::ToString($nonce).Replace('-', '').ToLower())
+  $msg = [Text.Encoding]::ASCII.GetBytes('FTRD2 PING ' + [BitConverter]::ToString($nonce).Replace('-', '').ToLower() + $(if ($script:leftover) { ' leftover' } else { '' }))
   $targets = @($Frame)
   if (-not $targets.Count) {
     if (Test-Path $FrameFile) { $targets = @((Get-Content $FrameFile -Raw).Trim()) }
@@ -572,12 +563,15 @@ if ($Install) {
   Write-Host "`n== This helper"
   Save-Baseline
   $ps = "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe"
+  # Through conhost --headless: a console with no window. (powershell -WindowStyle Hidden
+  # alone shows an empty window where Windows Terminal is the default console, as on Windows 11.)
+  $conhost = Join-Path $env:SystemRoot 'System32\conhost.exe'
   $sc = (New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path ([Environment]::GetFolderPath('Startup')) 'ftrd-host.lnk'))
-  $sc.TargetPath = $ps; $sc.WindowStyle = 7; $sc.Description = 'Remote PC: pairs the Steam Frame, keeps the display layout'
-  $sc.Arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$dest`" -Run"
+  $sc.TargetPath = $conhost; $sc.WindowStyle = 7; $sc.Description = 'Remote PC: pairs the Steam Frame, keeps the display layout'
+  $sc.Arguments = "--headless `"$ps`" -NoProfile -ExecutionPolicy Bypass -File `"$dest`" -Run"
   $sc.Save()
   Open-Pairing 30
-  Start-Process -WindowStyle Hidden -FilePath $ps -ArgumentList @('-NoProfile', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', $dest, '-Run')
+  Start-Process -FilePath $conhost -ArgumentList "--headless `"$ps`" -NoProfile -ExecutionPolicy Bypass -File `"$dest`" -Run"
   # A short command for the rest (ftrd-host -Status, ...): a .cmd in WindowsApps, a folder
   # Windows keeps on every user's PATH.
   Set-Content (Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\ftrd-host.cmd') -Encoding ASCII `
@@ -649,7 +643,7 @@ Log ("agent running; Frame " + $(if ($Frame.Count) { $Frame -join ',' } else { '
 $mons = @(); $known = $false        # last answer's monitors; whether we've had one
 $accepted = ''; $cand = ''; $candSince = Get-Date
 $busyUntil = Get-Date '2000-01-01'; $lastFix = Get-Date '2000-01-01'
-$seen = ''; $since = Get-Date; $noneSince = $null; $orphanDone = $false
+$seen = ''; $since = Get-Date; $noneSince = $null; $orphanDone = $false; $script:leftover = $false
 while ($true) {
   Start-Sleep -Milliseconds 1000
   $now = Get-Date
@@ -683,9 +677,11 @@ while ($true) {
   $d = Describe $os
   if ($d -ne $seen) { $seen = $d; $since = $now; continue }
   if (($now - $since).TotalSeconds -lt 5 -or $now -lt $busyUntil -or ($now - $lastFix).TotalSeconds -lt 8) { continue }
-  if ($noneSince -and -not $orphanDone -and ($now - $noneSince).TotalSeconds -ge 30 -and ($os | Where-Object { $_.Attached -and $_.Virtual })) {
-    $orphanDone = $true; Terminate-Virtual; continue
-  }
+  # The Frame closed all its monitors but one is still attached here (Vibepollo 2.0.0 defers
+  # the cleanup of a monitor closed while another was open, then forgets it): say so in the
+  # pings, and the Frame (still answering for a while) releases each identity once.
+  $script:leftover = $noneSince -and ($now - $noneSince).TotalSeconds -ge 3 -and ($os | Where-Object { $_.Attached -and $_.Virtual })
+  if ($script:leftover -and -not $orphanDone) { $orphanDone = $true; Log 'leftover virtual monitor after the Frame closed all of them; asking the Frame to release it' }
   $map = if ($mons.Count) { Resolve-Displays $mons $os } else { @{} }
   $changes = @(Layout-Changes $os $(if ($mons.Count) { $accepted } else { '' }) $map)
   if ($changes.Count) {
