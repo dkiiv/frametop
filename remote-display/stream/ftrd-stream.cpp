@@ -28,13 +28,18 @@
 //     --dump F --dump-frame N   write decoded frame N as RGBA (after GPU conversion)
 //     --keys DIR        client cert/key dir (default ~/.config/frametop-remote-display)
 //     --input-test      3 s in, move the PC's cursor to (1234, 567) (checks the input path headless)
+//     --latency-test N  N round trips of input to picture, all on the Frame's clock: move the PC's
+//                       cursor away, then onto a spot; time from sending the move to the first
+//                       decoded frame whose pixels at that spot changed (Frame -> PC input ->
+//                       capture -> encode -> network -> decode). Moves the PC's real cursor.
 //
 // Prints a stats line every 5 s and a summary at the end: frame rate, lost frames, Sunshine's
 // host processing latency, RTT, and the Frame-side latency from the first packet of a frame
 // arriving to its texture being handed to SteamVR (receive + queue + decode + convert).
 //
-// Third-party code (fetched by fetch-deps.sh, never committed): moonlight-embedded's
-// libgamestream and moonlight-common-c, both GPLv3. This binary is a local POC, not distributed.
+// Third-party code (fetched by build.sh, never committed): moonlight-embedded's libgamestream
+// and moonlight-common-c, both GPLv3, so the built binary is GPLv3 (remote-display/README.md,
+// License). It can't be merged into MIT Frametop as is.
 #include "../common/rdcore.h"
 
 extern "C" {
@@ -60,6 +65,7 @@ struct Opts {
     const char *pair = nullptr, *dump = nullptr;
     int w = 2560, h = 1440, fps = 90, bitrate = 50000, dumpFrame = 300;
     bool check = false;  // --check: only report whether this identity is paired (exit 0) or not (3)
+    int latencyTrials = 0;
     bool hevc = true, vr = true, inputTest = false, wl = false, follow = false, followSet = false, yield = true;
     std::string wlId = "org.frametop.RemoteDisplay", wlTitle = "Remote PC";
     int appId = -1;
@@ -144,6 +150,27 @@ struct GameWatch {
     }
     bool Yield() const { return known && game && hide; }
 } g_game;
+
+// ---- --latency-test: input-to-decoded-frame round trips (one clock: the Frame's) -------------
+// The main loop moves the PC's cursor to a far spot B, waits, then onto spot A and arms t0. The
+// decoder thread keeps a copy of the luma box at A from every frame while disarmed (the
+// baseline: A without the cursor) and, once armed, reports the first frame whose box differs
+// (the arrow drawn there by the PC's capture).
+struct LatTest {
+    std::atomic<int64_t> t0{0};  // armed at this MonoNs; 0 = disarmed
+    std::atomic<int64_t> hitNs{0};
+    int ax = 0, ay = 0;          // spot A (stream pixels)
+    static constexpr int BW = 24, BH = 32;
+    uint8_t base[BW * BH] = {};
+    bool haveBase = false;
+    std::vector<double> ms;      // results (main thread)
+    std::vector<double> hostMs;  // Sunshine's host processing for the detected frames
+    std::atomic<double> lastHost{0};
+    int64_t armedNs = 0;         // main thread's copy of t0
+    int misses = 0;
+} g_lat;
+
+void LatCheck(int capIdx, int frame);
 
 // State for ftrd-presence (the PC-side link, see remote-display/host/README.md): what this
 // instance shows, as JSON in $FTRD_STATE_FILE, rewritten on every change.
@@ -265,6 +292,29 @@ bool ShowFrame(int capIdx, int frame) {
     return false;
 }
 
+void LatCheck(int capIdx, int frame) {
+    const auto &pm = g_D.capFmt.fmt.pix_mp;
+    const uint8_t *y = static_cast<const uint8_t *>(g_D.cap[size_t(capIdx)].map[0]);
+    if (!y || g_lat.ax + LatTest::BW > int(g_D.visible.width) || g_lat.ay + LatTest::BH > int(g_D.visible.height)) return;
+    const size_t stride = pm.plane_fmt[0].bytesperline;
+    uint8_t box[LatTest::BW * LatTest::BH];
+    for (int r = 0; r < LatTest::BH; ++r)
+        memcpy(box + r * LatTest::BW, y + size_t(g_lat.ay + r) * stride + size_t(g_lat.ax), LatTest::BW);
+    const int64_t t0 = g_lat.t0.load();
+    if (!t0 || !g_lat.haveBase) {
+        memcpy(g_lat.base, box, sizeof box);
+        g_lat.haveBase = true;
+        return;
+    }
+    int changed = 0;
+    for (int i = 0; i < LatTest::BW * LatTest::BH; ++i) changed += std::abs(int(box[i]) - int(g_lat.base[i])) > 40;
+    if (changed < 20) return;  // the arrow is ~100+ pixels of the box; noise/encoding is a few
+    const Slot &s = g_slots[frame % kSlots];
+    g_lat.lastHost = s.frame == frame ? s.hostMs : 0;
+    g_lat.hitNs = MonoNs();
+    g_lat.t0 = 0;
+}
+
 // Reclaim bitstream buffers, handle events, show decoded frames. Returns once frame `target`
 // has been shown (or timeoutMs passes).
 void Pump(int target, int timeoutMs) {
@@ -289,6 +339,7 @@ void Pump(int target, int timeoutMs) {
                 ++g_decodeErrors;
                 g_needIdr = true;
             } else if (pl[0].bytesused > 0) {
+                if (g_o.latencyTrials) LatCheck(int(b.index), frame);
                 if (ShowFrame(int(b.index), frame)) {  // window mode: KWin gives it back
                     if (frame >= target) gotTarget = true;
                     continue;
@@ -584,6 +635,7 @@ int main(int argc, char **argv) {
             g_o.wl = true, g_o.vr = false;
             if (i + 1 < argc && argv[i + 1][0] != '-') sscanf(argv[++i], "%dx%d", &g_o.winW, &g_o.winH);
         }
+        else if (a == "--latency-test") g_o.latencyTrials = atoi(next());
         else if (a == "--input-test") g_o.inputTest = true;  // 3 s in: move the PC's cursor to (1234, 567)
         else if (a == "--dump") g_o.dump = next();
         else if (a == "--dump-frame") g_o.dumpFrame = atoi(next());
@@ -831,6 +883,44 @@ int main(int argc, char **argv) {
             printf("input-test: sent absolute mouse (1234, 567) of %dx%d -> %d\n", g_o.w, g_o.h, r2);
             inputTested = true;
         }
+        // --latency-test state machine: 0 = wait for video, 1 = cursor at B, 2 = armed (cursor sent to A)
+        if (g_o.latencyTrials && !suspended) {
+            static int phase = 0, done = 0;
+            static int64_t at = 0;
+            static unsigned rnd = 12345;
+            const short W = short(g_o.w), H = short(g_o.h);
+            if (phase == 0 && g_shown.load() > 0 && (now - t0) / 1e9 >= 3) {
+                g_lat.ax = g_o.w / 4, g_lat.ay = g_o.h / 4;
+                LiSendMousePositionEvent(short(g_o.w * 3 / 4), short(g_o.h * 3 / 4), W, H);
+                phase = 1, at = now;
+            } else if (phase == 1) {
+                rnd = rnd * 1103515245u + 12345u;
+                // 300 ms at B, plus 0-33 ms so the moves land at random points of the capture cycle
+                if (now - at >= 300000000LL + int64_t((rnd >> 8) % 33000) * 1000) {
+                    g_lat.hitNs = 0;
+                    g_lat.armedNs = MonoNs();
+                    g_lat.t0 = g_lat.armedNs;
+                    // FTRD_LAT_CONTROL=1: a negative control, the cursor goes elsewhere (expect misses)
+                    if (getenv("FTRD_LAT_CONTROL")) LiSendMousePositionEvent(short(g_o.w / 4), short(g_o.h * 3 / 4), W, H);
+                    else LiSendMousePositionEvent(short(g_lat.ax), short(g_lat.ay), W, H);
+                    phase = 2, at = now;
+                }
+            } else if (phase == 2) {
+                if (g_lat.t0.load() == 0 && g_lat.hitNs.load()) {
+                    const double ms = (g_lat.hitNs.load() - g_lat.armedNs) / 1e6;
+                    g_lat.ms.push_back(ms), g_lat.hostMs.push_back(g_lat.lastHost.load());
+                    ++done;
+                } else if (now - g_lat.armedNs > 1000000000LL) {
+                    g_lat.t0 = 0, ++g_lat.misses, ++done;
+                    printf("latency: trial %d: no change seen in 1 s\n", done);
+                }
+                if (g_lat.t0.load() == 0) {
+                    if (done >= g_o.latencyTrials) break;
+                    LiSendMousePositionEvent(short(g_o.w * 3 / 4), short(g_o.h * 3 / 4), W, H);
+                    phase = 1, at = now;
+                }
+            }
+        }
         if (now - lastPrint >= 5000000000LL) {
             std::lock_guard<std::mutex> l(g_mu);
             PrintWindow("stats", g_win, (now - lastPrint) / 1e9);
@@ -944,6 +1034,17 @@ int main(int argc, char **argv) {
         printf("\nRESULT %s %dx%d %s %d kbps, %.1f s, %llu frames shown\n", g_o.host.c_str(), g_o.w, g_o.h,
                g_o.hevc ? "HEVC" : "H.264", g_o.bitrate, wall, (unsigned long long)g_shown.load());
         PrintWindow("  all", g_all, wall);
+        if (g_o.latencyTrials) {
+            std::vector<double> v = g_lat.ms;
+            std::sort(v.begin(), v.end());
+            printf("  latency-test: %zu/%d trials | input->decoded frame median %.1f ms, p10 %.1f, p90 %.1f, min %.1f, max %.1f"
+                   " | host (capture+encode) median %.1f ms | rtt/2 included | %d misses\n",
+                   v.size(), g_o.latencyTrials, Pct(v, 50), Pct(v, 10), Pct(v, 90), v.empty() ? NAN : v.front(),
+                   v.empty() ? NAN : v.back(), Pct(g_lat.hostMs, 50), g_lat.misses);
+            printf("  latency-test raw:");
+            for (double x : g_lat.ms) printf(" %.1f", x);
+            printf("\n");
+        }
         if (g_o.wl)
             printf("  window: %llu commits; input %llu moves, %llu clicks, %llu scrolls, %llu keys; pointer lowest row %d of %d\n",
                    (unsigned long long)g_wl.commits, (unsigned long long)g_wl.moves, (unsigned long long)g_wl.clicks,

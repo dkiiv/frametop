@@ -1,6 +1,9 @@
 # 04 — Milestones
 
-**Status (2026-10-07):** M0–M4 and M6 done. M5 done except a worn test with a real VR game.
+**Status (2026-10-08):** M0–M4 and M6 done. **M5 not done:** its acceptance criterion, the
+worn test with a real VR game, is unverified (postponed by Curtis; audit item 1). End-to-end
+latency measured (log/2026-10-08-audit.md: input->decoded frame median 13 ms on the Valve
+adapter, 19 ms on home Wi-Fi).
 Open: the items under "Open items to revisit", comparing with the Frametop dev's design (M4),
 and the backlog (audio, auto-reconnect, codec bake-off). User guide: remote-display/README.md.
 

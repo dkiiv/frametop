@@ -7,9 +7,10 @@ the controllers, type with Frametop's keyboard. Your physical monitors stay on, 
 ones sit to their right in Windows, in the same order as the panels around you, so a window
 dragged off the right edge of the left panel comes in on the right panel.
 
-Status: a proof of concept on the dkiiv/frametop fork (branch `remote-display-poc-handoff`),
-not part of Frametop. It works day to day on one setup (RTX 5080, Vibepollo 2.0.0); expect rough
-edges elsewhere.
+Status: a personal proof of concept on the dkiiv/frametop fork (branch
+`remote-display-poc-handoff`), not part of Frametop and not supported by its developer or by me.
+It works day to day on one setup (RTX 5080, Vibepollo 2.0.0); expect rough edges elsewhere.
+License: the built client is GPLv3, not MIT (see [License](#license)).
 
 You need a Steam Frame and a Windows 10/11 PC with a GPU that can encode HEVC (NVIDIA, AMD or
 Intel), on the same network. Valve's USB Wi-Fi adapter for the PC gives the lowest latency (about
@@ -128,12 +129,29 @@ and logged in).
 
 - No sound (it stays on the PC).
 - Stepping aside for VR games is tested only with a simulated game so far.
+- Latency: Frame input to a decoded frame showing it, median 13 ms over Valve's USB adapter,
+  19 ms over home Wi-Fi (`ftrd-stream --latency-test`, docs/handoff/log/2026-10-08-audit.md);
+  add ~1-2 frames for the headset's compositor and display.
 - Frametop's keyboard doesn't open by itself when you click a text field on the PC; use the
   mapped button.
 - One paired device per virtual monitor, up to 4 (Vibepollo).
 - Vibepollo 2.0.0 shuffles the physical monitors at each virtual monitor start/stop (the helper
   puts them back) and its first start sometimes fails and is retried, so opening takes a few
   seconds and your screens blink.
+
+## License
+
+Frametop is MIT. The Remote PC client is not: `stream/build.sh` downloads moonlight-embedded's
+libgamestream and moonlight-common-c (both GPLv3) at build time and links them into
+`stream/build/ftrd-stream`, so **that binary is GPLv3**. The consequences:
+
+- The GPL code itself is never in this repository; it's fetched into `build/` (git-ignored).
+  The scripts and sources committed here are MIT like the rest of the fork.
+- ftrd-stream as built cannot be merged into or shipped with MIT Frametop. Doing that would need
+  a protocol client under an MIT-compatible license, or Frametop to accept GPLv3.
+- If you pass a built binary to someone, the GPLv3 applies to it: give them the source (this
+  branch plus the pinned moonlight-embedded commit in `stream/build.sh`).
+- This branch is a personal POC: no support, no warranty, no promise it keeps working.
 
 ## How it fits together
 

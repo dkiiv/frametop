@@ -1,7 +1,31 @@
 # 03 — Technical notes
 
 Facts marked **[verified]** were read out of the Frametop repo (paths given) or
-are stable public facts. **[open]** = measure/verify yourself; don't trust them.
+are stable public facts. **[measured]** = measured on Curtis's Frame/PC during the
+POC (the log entry is named). **[open]** = still unverified. The original brief's
+guesses that turned out wrong are struck through and corrected in place.
+
+## The Frame's decode stack [measured, M0: log/2026-10-06-m0-decoder-probe.md]
+
+- SoC **Qualcomm SM8650** (Snapdragon 8 Gen 3), GPU Adreno 750 (Mesa Turnip; GL via
+  Zink, GLES via freedreno). Not Panfrost/Venus.
+- Hardware decoder: upstream **qcom-iris**, a V4L2 **stateful** M2M decoder at
+  `/dev/video22` = **`/dev/video-dec0`** (kernel 6.18). `steamos` has rw (video group);
+  works from the `dev` container. `/dev/video0..21` are the camera ISP (tracking and
+  passthrough), `/dev/video99` is SteamVR's v4l2loopback webcam.
+- Codecs: H.264, HEVC, VP9. **No AV1.** Up to 8192x8192.
+- **No VA-API, no Vulkan video** (Turnip exposes no VK_KHR_video_*). V4L2 is the only path.
+- Output: NV12 (linear; coded 1920x1088 for 1080p, UV plane at stride*1088 in the same
+  buffer), Q08C (UBWC NV12); "AB24" is not linear RGBA. Every capture buffer exports as a
+  DMA-BUF (VIDIOC_EXPBUF). Hold a shown buffer until the next one: iris reuses a buffer
+  requeued at once.
+- **NV12 straight to SteamVR renders green garbage**, although
+  `GetDmabufModifiers` lists NV12 and `ImportDmabuf` succeeds. Convert on the GPU to
+  **linear ABGR8888** (EGL dmabuf import + samplerExternalOES, BT.709 limited range for
+  Sunshine): ~1-2 ms at 1080p, 2-3 ms at 4K; PSNR 50 dB against software decode.
+  (Window mode avoids the pass entirely: NV12 goes to KWin, which converts while compositing.)
+- Cost, headset worn and passthrough on: 1080p60 decode ~2.5 ms/frame and ~2% of the SoC
+  beyond idle; 4K60 HEVC holds 60 fps at ~4.5 ms/frame. 0 compositor drops.
 
 ## The display path you're extending [verified]
 
@@ -35,11 +59,13 @@ touches zero Frametop code.
   Frametop is MIT.
 - Input back-channel: keyboard/mouse/gamepad events are defined by the protocol
   (the same packets Moonlight sends); Sunshine injects them.
-- The Frame's GPU: vendor ARM SoC with a hardware video block exposed through
-  Mesa (Panfrost/Venus stack) — whether it exposes a **V4L2 stateful decoder**
-  or only GL/Vulkan decode is the single most important unknown. **[open]**
+- ~~The Frame's GPU: Panfrost/Venus; V4L2 vs GL/Vulkan decode unknown.~~
+  **Resolved (M0):** Qualcomm, V4L2 stateful (qcom-iris); see "The Frame's decode stack".
+- License **[verified]**: moonlight-embedded (libgamestream) and moonlight-common-c are
+  **GPLv3**. ftrd-stream fetches and links them at build time, so the built client is
+  GPLv3 and can't be merged into MIT Frametop. remote-display/README.md, License.
 
-## Decoder budget [partially verified]
+## Decoder budget [measured: resolved]
 
 - The dev's own words (Oct 2026): "definitely doable... so long as you aren't
   streaming multiple 4k displays"; "decoder budget is pretty much separate from
@@ -47,17 +73,21 @@ touches zero Frametop code.
 - Frametop's existing VNC path encodes H.264 **in software on the Frame**
   (~60% of a core, `session/vnc-bridge.sh` comment) — that's the CPU cost the
   new path avoids by decoding instead.
-- Measure early: run `ffmpeg`/`mpv` hardware-decoding a 1080p60 HEVC file on the
-  Frame while passthrough is active; watch thermal/fps. If a file decode can't
-  hold 60fps with passthrough on, a live stream won't either. **[open]**
+- ~~Measure early ... [open]~~ **Resolved (M0, worn, passthrough on):** 1080p60
+  H.264/HEVC at 60.03 fps, 0 drops, ~2% SoC; 4K60 HEVC too; video block ~40 C flat. Live
+  (M2-M4): 5120x1440@60 and 2560x1440@90 streams, Frame SoC 6-17% busy; two monitors at once
+  fine. A suspended stream closes the decoder (M5).
 
-## Latency budget [open]
+## Latency budget [measured: see the latest log entry for end-to-end]
 
 - Text-typing comfort needs end-to-end (mouse-move on PC → photon on Frame)
-  under ~50–70 ms. Typical Moonlight LAN numbers: 10–20 ms encode, 5–10 ms
-  network, 5–15 ms decode, +compositor. The Frame adds SteamVR overlay
-  compositing — unknown. Instrument with a phone-camera photo of a latency
-  overlay (e.g. `displayfd`-style test pattern on Windows vs Frame screen).
+  under ~50–70 ms.
+- Measured per stage (M2/M4): host capture+encode 1.6-4.4 ms (RTX 5080, NVENC P1), RTT 1-3 ms
+  on the Valve USB adapter, Frame receive→shown 3.8 ms (window mode) / ~7 ms (overlay mode).
+- End to end: `ftrd-stream --latency-test N` times Frame input → PC cursor → capture → encode
+  → network → decoded frame on the Frame's one clock (no camera); numbers per network path in
+  log/2026-10-08-audit.md. Not included: Frame display scan-out and SteamVR compositing
+  (~1 frame at 90 Hz, ~11 ms), which only a camera can see. **[open]**: a photon measurement.
 
 ## Existing baseline to beat [verified]
 
@@ -81,13 +111,22 @@ codebase's only network-video code and shows the service/credential patterns
 
 ## Risks, ranked
 
-1. **No usable hardware decoder path on the Frame** (no V4L2 M2M / no dmabuf
-   output from the decoder). Fallback: CPU-decode 1080p (AV1/HEVC too slow,
-   H.264 maybe) — POC becomes "can't, here's the data". Measure this FIRST.
-2. Decoder contention with passthrough causes stutter/thermal issues.
-3. SteamVR overlay import rejects the decoder's modifiers (measure with
-   `GetDmabufModifiers` early).
-4. Input back-channel edge cases (relative vs absolute mouse; Sunshine expects
-   Moonlight's absolute pointer packets — map Frametop's panel-space coords).
+1. ~~No usable hardware decoder path on the Frame.~~ Resolved M0: qcom-iris works.
+2. ~~Decoder contention with passthrough.~~ Resolved M0: none measured.
+3. ~~SteamVR rejects the decoder's modifiers.~~ Resolved M0: accepted but NV12 renders
+   green; GPU-convert to ABGR8888 (or window mode).
+4. ~~Input back-channel edge cases.~~ Resolved M3: absolute mouse, buttons, scroll, keys
+   work; keyboard auto-open still open (04-milestones).
 5. Upstream churn: dev ships his own version mid-project → our code is a
    spike, not a product. Accept and move on.
+
+## Fork patches to upstream Frametop code [tracking]
+
+- `screens/vr.cpp` MakeChrome: controls' mouse scale = texture size (commit cf893c8 here, and
+  branch fix/grab-bar-hit-box). It **duplicates upstream PR #46** (SaberMage, same fix), which
+  the maintainer said he'd pull in for the next release; as of 2026-10-08 it isn't in upstream
+  `main` or `experimental` yet. When it lands: drop cf893c8 when rebasing onto upstream and
+  delete fix/grab-bar-hit-box. Check: `git grep -n SetOverlayMouseScale origin/main --
+  screens/vr.cpp` shows a line inside MakeChrome.
+- `setup/dev-container.sh`: judges success by what's installed (udisks2's scriptlet fails in a
+  rootless container); upstream-worthy, not offered yet (Curtis's call).

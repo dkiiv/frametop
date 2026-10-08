@@ -1,9 +1,11 @@
 # Frametop
 
-> **This is the dkiiv/frametop fork, branch `remote-display-poc-handoff`.** It adds **Remote PC**:
-> your Windows PC's monitors as virtual monitors in Frametop panels. Setting it up is one line on
-> the PC and two SSH commands from it for the Frame (which install Frametop too): see
-> [remote-display/README.md](remote-display/README.md). Everything below is upstream Frametop's README.
+> **This is the dkiiv/frametop fork, branch `remote-display-poc-handoff`: a personal proof of
+> concept, not part of Frametop and not supported.** It adds an experimental **Remote PC**: your
+> Windows PC's monitors as virtual monitors in Frametop panels. Its client is built against GPLv3
+> code (Moonlight), so the built binary is GPLv3, not MIT, and can't go into Frametop as is. See
+> [remote-display/README.md](remote-display/README.md). Everything below is upstream Frametop's
+> README.
 
 Frametop is a desktop for the Steam Frame that runs on the headset itself, with no PC. Put several monitors around you, pull app windows out to float on their own, and point with a mouse, or with your eyes.
 
