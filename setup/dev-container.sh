@@ -50,7 +50,16 @@ fi
 "$distrobox" enter dev -- bash -c '
 set -euo pipefail
 echo "installing ${#@} packages (already-installed ones are skipped)"
-sudo -n dnf install -y -q "$@" 2>&1 | { grep -vE "is already installed|^Nothing to do|^$" || true; }
+# In a rootless container some package scriptlets cannot touch the host (udisks2 writes to /sys),
+# and dnf then reports "Rpm transaction failed" although every package got installed. So judge
+# by what is installed: retry once, and fail only if packages are really missing.
+for try in 1 2; do
+  { sudo -n dnf install -y -q "$@" 2>&1 || true; } | { grep -vE "is already installed|^Nothing to do|^$" || true; }
+  missing=$(rpm -q --whatprovides "$@" 2>&1 | grep -E "^no package provides" || true)
+  [ -z "$missing" ] && break
+  [ "$try" = 2 ] && { echo "$missing" >&2; exit 1; }
+  echo "some packages are missing after dnf; trying again"
+done
 # OpenVR programs built here (the pointer helper and probe) look for the runtime at /opt/steamvr.
 [ -e /opt/steamvr ] || sudo -n ln -s /run/host/opt/steamvr /opt/steamvr
 echo "dev container ready: $(. /etc/os-release; echo $PRETTY_NAME), glibc $(ldd --version | head -1 | grep -oE "[0-9.]+$")"
