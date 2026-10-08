@@ -96,14 +96,22 @@ def pose(n):
         return None
 
 
+LAST_HEAD = None
+
+
 def head():
+    """The head's position and yaw. ft-screens has none while tracking blips or the headset is
+    off its face; then the last one (panels stay where they are in the room, and the PC only
+    uses their angles relative to each other), so their arrangement doesn't flicker to
+    "unknown" and make the PC rearrange its displays."""
+    global LAST_HEAD
     r = ask("ft_screens", "head").split()
     if len(r) >= 5 and r[0] == "ok":
         try:
-            return float(r[1]), float(r[2]), float(r[3]), float(r[4])
+            LAST_HEAD = float(r[1]), float(r[2]), float(r[3]), float(r[4])
         except ValueError:
             pass
-    return None
+    return LAST_HEAD
 
 
 def snapshot():

@@ -659,6 +659,13 @@ while ($true) {
       $mons = @($a.Monitors); $known = $true
       if ($mons | Where-Object { $_.busy }) { $busyUntil = $now.AddSeconds(6) }  # a monitor is (re)starting
       $ls = Layout-Spec $mons
+      # A monitor without a position (its panel's pose unknown for a moment): keep the accepted
+      # arrangement if it has the same monitors, rather than falling back to the default order
+      # (each change re-applies every display: all screens blank, a fullscreen game may not
+      # come back).
+      $ids = (@($mons | ForEach-Object { [string]$_.instance }) | Sort-Object) -join ' '
+      $accIds = if ($accepted) { (@($accepted.Split('|,')) | Sort-Object) -join ' ' } else { '' }
+      if (@($mons | Where-Object { $null -eq $_.az }).Count -and $accepted -and $ids -eq $accIds) { $ls = [pscustomobject]@{ Spec = $accepted; MinGap = 1000 } }
       if ($ls.Spec -ne $cand) { $cand = $ls.Spec; $candSince = $now }
       # Take a new arrangement once the panels have stopped moving (4 s), and only when it's
       # clear-cut: neighbouring columns at least 8 degrees apart.
