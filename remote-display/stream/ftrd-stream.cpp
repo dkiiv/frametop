@@ -143,15 +143,15 @@ struct GameWatch {
 
 // State for ftrd-presence (the PC-side link, see remote-display/host/README.md): what this
 // instance shows, as JSON in $FTRD_STATE_FILE, rewritten on every change.
-void WriteState(bool suspended) {
+void WriteState(bool suspended, bool busy = false) {
     const char *path = getenv("FTRD_STATE_FILE");
     if (!path) return;
     const std::string tmp = std::string(path) + ".tmp";
     FILE *f = fopen(tmp.c_str(), "w");
     if (!f) return;
-    fprintf(f, "{\"pid\": %d, \"app\": \"%s\", \"keys\": \"%s\", \"wl_id\": \"%s\", \"w\": %d, \"h\": %d, \"window\": %s, \"suspended\": %s}\n",
+    fprintf(f, "{\"pid\": %d, \"app\": \"%s\", \"keys\": \"%s\", \"wl_id\": \"%s\", \"w\": %d, \"h\": %d, \"window\": %s, \"suspended\": %s, \"busy\": %s}\n",
             int(getpid()), g_o.app.c_str(), g_o.keys.c_str(), g_o.wl ? g_o.wlId.c_str() : "", g_o.w, g_o.h,
-            g_o.wl ? "true" : "false", suspended ? "true" : "false");
+            g_o.wl ? "true" : "false", suspended ? "true" : "false", busy ? "true" : "false");
     fclose(f);
     rename(tmp.c_str(), path);
 }
@@ -691,6 +691,25 @@ int main(int argc, char **argv) {
                           g_o.wlTitle.c_str()))
         return 1;
     if (!g_o.followSet) g_o.follow = g_o.wl && g_o.app == "Remote Monitor";
+    if (g_o.follow) {
+        // ft-floatd sizes the window to its panel right after it maps; start the monitor at that
+        // size rather than reconnecting (and re-jogging the PC's displays) a second later.
+        const int64_t w0 = MonoNs();
+        while (MonoNs() - w0 < 4000000000LL) {
+            WlPoll(50, [](int) {});
+            if (g_wl.closed) return 1;
+            if (g_wl.winW > 0 && MonoNs() - g_wl.resizedNs > 1200000000LL && MonoNs() - w0 > 1500000000LL) break;
+        }
+        if (g_wl.winW > 0 && g_wl.winH > 0) {
+            const int w = std::clamp(g_wl.winW & ~7, 640, 7680), h = std::clamp(g_wl.winH & ~7, 360, 4320);
+            if (w != g_o.w || h != g_o.h) {
+                printf("window: %dx%d after %.1f s; monitor starts at %dx%d\n", g_wl.winW, g_wl.winH, (MonoNs() - w0) / 1e9, w, h);
+                g_o.w = w, g_o.h = h, cfg.width = w, cfg.height = h;
+                WlNewStream(w, h);
+            }
+        }
+    }
+    WriteState(false, true);
 
   auto launch = [&]() -> int {
     r = gs_start_app(&server, &cfg, appId, false, true /* audio stays on the PC */, 0);
@@ -706,13 +725,15 @@ int main(int argc, char **argv) {
         r = gs_start_app(&server, &cfg, appId, false, true, 0);
     }
     // "not yet capture-ready": a monitor of this client's is stuck at another size. Same cure.
-    for (int attempt = 1; attempt <= 3 && r != GS_OK && gs_error &&
+    // Each attempt makes Vibepollo re-jog the PC's whole display topology (all screens blink), so
+    // back off rather than hammer it: 3 s, 6 s.
+    for (int attempt = 1; attempt <= 2 && r != GS_OK && gs_error &&
                           (strstr(gs_error, "did not apply") || strstr(gs_error, "not yet capture-ready"));
          ++attempt) {
-        printf("host: \"%s\"; release and retry (%d/3)\n", gs_error, attempt);
+        printf("host: \"%s\"; release and retry (%d/2) in %d s\n", gs_error, attempt, 3 * attempt);
         server.currentGame = 0;
         gs_start_app(&server, &cfg, 2147483502 /* Disconnect Monitor */, false, true, 0);
-        sleep(2);
+        sleep(3 * attempt);
         server.currentGame = 0;
         r = gs_start_app(&server, &cfg, appId, false, true, 0);
     }
@@ -747,6 +768,26 @@ int main(int argc, char **argv) {
     }
     int64_t lastPrint = MonoNs();
     int64_t lastResize = MonoNs();
+    int64_t retryAt = 0;
+    int retries = 0;
+    auto reconnect = [&]() -> bool {  // launch + connect; on failure schedule a retry
+        if (retries && g_o.app == "Remote Monitor") {  // a failed attempt may have left a half-made monitor
+            server.currentGame = 0;
+            gs_start_app(&server, &cfg, 2147483502 /* Disconnect Monitor */, false, true, 0);
+            sleep(2);
+        }
+        server.currentGame = 0;
+        if (launch() == 0) {
+            r = LiStartConnection(&server.serverInfo, &cfg, &cl, &dr, nullptr, nullptr, 0, nullptr, 0);
+            if (r == 0) { retries = 0; WriteState(false); return true; }
+            fprintf(stderr, "LiStartConnection failed (%d)\n", r);
+            gs_quit_app(&server);
+        }
+        ++retries;
+        retryAt = MonoNs() + int64_t(std::min(5 * retries, 20)) * 1000000000LL;
+        WriteState(false, true);
+        return false;
+    };
     bool suspended = false;
     int64_t suspendedAt = 0;
     const CpuStat cpu0 = ReadCpu();
@@ -837,7 +878,7 @@ int main(int argc, char **argv) {
         }
         // Follow the window's size: reconnect at it once it has settled.
         if (g_o.follow && g_wl.winW > 0 && g_wl.winH > 0 && now - g_wl.resizedNs > 1500000000LL &&
-            now - lastResize > 3000000000LL) {
+            now - lastResize > 3000000000LL && !retryAt) {
             const int w = std::clamp(g_wl.winW & ~7, 640, 7680), h = std::clamp(g_wl.winH & ~7, 360, 4320);
             if (std::abs(w - g_o.w) > 8 || std::abs(h - g_o.h) > 8) {
                 lastResize = now;
@@ -852,12 +893,17 @@ int main(int argc, char **argv) {
                 server.currentGame = 0;
                 g_o.w = w, g_o.h = h, cfg.width = w, cfg.height = h;
                 WlNewStream(w, h);
-                if (launch()) { g_termError = true; g_terminated = true; break; }
-                r = LiStartConnection(&server.serverInfo, &cfg, &cl, &dr, nullptr, nullptr, 0, nullptr, 0);
-                if (r != 0) { fprintf(stderr, "LiStartConnection failed (%d)\n", r); g_termError = true; break; }
-                printf("resize: reconnected in %.1f s\n", (MonoNs() - r0) / 1e9);
-                WriteState(false);
+                WriteState(false, true);
+                sleep(2);  // let Vibepollo finish removing the old monitor ("not yet capture-ready")
+                if (reconnect()) printf("resize: reconnected in %.1f s\n", (MonoNs() - r0) / 1e9);
             }
+        }
+        // A failed reconnect keeps the window (last frame) and tries again, gently.
+        if (retryAt && now >= retryAt) {
+            retryAt = 0;
+            printf("reconnect: retry %d/6\n", retries);
+            if (reconnect()) printf("reconnect: ok\n");
+            else if (retries >= 6) { fprintf(stderr, "reconnect: giving up\n"); g_termError = 1; break; }
         }
     }
     const double wall = (MonoNs() - t0) / 1e9;

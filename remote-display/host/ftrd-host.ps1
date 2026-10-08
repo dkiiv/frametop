@@ -8,7 +8,11 @@ Keeps the PC's display layout the way you want it while the Steam Frame shows vi
   - the virtual monitors always sit right of the physical ones, arranged the way their panels
     sit around you in the Frame (left of / right of / above each other), so dragging windows
     between them works as it looks. The panel positions come from ftrd-presence on the Frame
-    (the agent asks every 2 s; no answer just means "keep the last arrangement").
+    (asked every second). A new arrangement is taken once the panels have stood still for 4 s
+    and only when clear-cut (8 degree deadzone); Windows is changed only when its displays have
+    been settled for 5 s and no monitor is (re)starting, and only for what differs;
+  - optionally removes a virtual monitor Vibepollo left behind (Frame says "no monitors" for
+    30 s), with a Vibepollo API token in vibepollo.token.
 
 Usage (PowerShell 5.1, as the logged-in user; no admin needed):
   ftrd-host.ps1 -Setup            make the link key and save the current physical layout as the baseline
@@ -16,7 +20,7 @@ Usage (PowerShell 5.1, as the logged-in user; no admin needed):
   ftrd-host.ps1 -Status           displays, baseline, the Frame's answer
   ftrd-host.ps1 -Restore          physical monitors back to the baseline now
   ftrd-host.ps1 -Run              the agent (Startup folder)
-Data folder: %LOCALAPPDATA%\ftrd (link.key, baseline.json, ftrd-host.log).
+Data folder: %LOCALAPPDATA%\ftrd (link.key, baseline.json, vibepollo.token (optional), ftrd-host.log).
 #>
 param([switch]$Setup, [switch]$SaveBaseline, [switch]$Status, [switch]$Restore, [switch]$Run,
       [string[]]$Frame = @('10.35.78.1', '10.0.0.253'), [int]$Port = 47810,
@@ -186,53 +190,100 @@ function Uuid-Display($uuid) {
   $null
 }
 
-# Where the virtual monitors go: right of the physical ones (from $originX, top-aligned at 0).
-# Frame monitors become columns left to right by panel azimuth (panels within 12 degrees of each
-# other stack, the higher one on top); virtual displays the Frame didn't name (no answer yet, an
-# older Frame side) follow in a row, in their current left-to-right order.
-function Plan-Virtual($mons, $os, $originX) {
-  $items = @()
-  $virt = @($os | Where-Object { $_.Attached -and $_.Virtual })
-  if (-not $virt) { return @() }
-  $i = 0
-  foreach ($m in $mons) {
-    $name = $null
-    $uuid = if ($m.cert_sha256) { Cert-Uuid $m.cert_sha256 } else { $null }
-    if ($uuid) { $name = Uuid-Display $uuid }
-    $o = if ($name) { $virt | Where-Object { $_.Name -eq $name } | Select-Object -First 1 } else { $null }
-    if (-not $o) { $o = $virt | Where-Object { $_.W -eq $m.w -and $_.H -eq $m.h -and $items.Name -notcontains $_.Name } | Select-Object -First 1 }
-    if (-not $o -or $items.Name -contains $o.Name) { continue }
-    # No panel pose (ft-floatd without "list apps"): a row, in instance order.
-    $az = if ($null -ne $m.az) { [double]$m.az } else { 1000 + 100 * $i }; $el = if ($null -ne $m.el) { [double]$m.el } else { 0 }
-    $items += [pscustomobject]@{ Name = $o.Name; W = $o.W; H = $o.H; Az = $az; El = $el }
-    $i++
-  }
-  foreach ($o in ($virt | Sort-Object X, Y)) {
-    if ($items.Name -contains $o.Name) { continue }
-    $items += [pscustomobject]@{ Name = $o.Name; W = $o.W; H = $o.H; Az = 5000 + 100 * $i; El = 0 }
-    $i++
-  }
-  $cols = @(); $cur = $null
-  foreach ($it in ($items | Sort-Object Az)) {
-    if ($cur -and [Math]::Abs($it.Az - $cur.Az) -lt 12) { $cur.Items += $it } else { $cur = [pscustomobject]@{ Az = $it.Az; Items = @($it) }; $cols += $cur }
-  }
-  $plan = @(); $x = $originX
-  foreach ($c in $cols) {
-    $y = 0; $cw = 0
-    foreach ($it in ($c.Items | Sort-Object El -Descending)) {
-      $plan += @{ Name = $it.Name; Fields = $DM_POSITION; X = $x; Y = $y; Primary = $false }
-      $y += $it.H; $cw = [Math]::Max($cw, $it.W)
+# ---- arrangement ---------------------------------------------------------------------------
+# The Frame's panels -> a layout spec: columns left to right, each top to bottom, of instance ids
+# ("1|2" = 1 left of 2; "1,2" = 1 above 2). Azimuths are taken relative to the panels' mean
+# direction, so turning your head changes nothing. Panels within 10 degrees of each other
+# sideways and more than 8 degrees apart vertically share a column.
+function Layout-Spec($mons) {
+  $posed = @($mons | Where-Object { $null -ne $_.az })
+  $rest = @($mons | Where-Object { $null -eq $_.az } | Sort-Object { [int]$_.instance })
+  $gap = 1000
+  if ($posed.Count) {
+    $sx = 0; $sy = 0
+    foreach ($m in $posed) { $r = [double]$m.az * [Math]::PI / 180; $sx += [Math]::Cos($r); $sy += [Math]::Sin($r) }
+    $mean = [Math]::Atan2($sy, $sx) * 180 / [Math]::PI
+    $items = @($posed | ForEach-Object { $d = (([double]$_.az - $mean + 540) % 360) - 180; [pscustomobject]@{ Id = [string]$_.instance; Az = $d; El = [double]$_.el } } | Sort-Object Az)
+    $cols = @(); $cur = $null
+    foreach ($it in $items) {
+      $stack = $cur -and [Math]::Abs($it.Az - $cur.Az) -lt 10 -and ($cur.Items | Where-Object { [Math]::Abs($_.El - $it.El) -gt 8 })
+      if ($stack) { $cur.Items += $it } else {
+        if ($cur) { $gap = [Math]::Min($gap, $it.Az - $cur.Az) }
+        $cur = [pscustomobject]@{ Az = $it.Az; Items = @($it) }; $cols += $cur
+      }
     }
-    $x += $cw
-  }
-  $plan
+    $spec = @($cols | ForEach-Object { ($_.Items | Sort-Object El -Descending | ForEach-Object Id) -join ',' })
+  } else { $spec = @() }
+  $spec += @($rest | ForEach-Object { [string]$_.instance })
+  [pscustomobject]@{ Spec = ($spec -join '|'); MinGap = $gap }
 }
-function Plan-Matches($plan, $os) {
-  foreach ($e in $plan) {
-    $o = $os | Where-Object Name -eq $e.Name
-    if (-not $o -or -not $o.Attached -or $o.X -ne $e.X -or $o.Y -ne $e.Y) { return $false }
+
+# Instance -> Windows display: certificate -> Vibepollo pairing -> the display it made for it.
+function Resolve-Displays($mons, $os) {
+  $map = @{}
+  $virt = @($os | Where-Object { $_.Attached -and $_.Virtual })
+  foreach ($m in $mons) {
+    $uuid = if ($m.cert_sha256) { Cert-Uuid $m.cert_sha256 } else { $null }
+    $name = if ($uuid) { Uuid-Display $uuid } else { $null }
+    $o = if ($name) { $virt | Where-Object { $_.Name -eq $name } | Select-Object -First 1 } else { $null }
+    if (-not $o) {  # fallback: the only virtual display of this size
+      $same = @($virt | Where-Object { $_.W -eq $m.w -and $_.H -eq $m.h })
+      if ($same.Count -eq 1) { $o = $same[0] }
+    }
+    if ($o) { $map[[string]$m.instance] = $o }
   }
-  return $true
+  $map
+}
+
+# The changes needed: physical monitors not at the baseline, virtual ones not where the spec
+# puts them (right of the physical ones, top-aligned). Only what differs; mode fields only for
+# a physical monitor whose mode differs (a position change alone doesn't re-mode anything).
+function Layout-Changes($os, $spec, $map) {
+  $entries = @()
+  $b = Get-Baseline
+  if ($b) {
+    foreach ($e in $b) {
+      $o = Find-Output $os $e
+      if (-not $o -or -not $o.Attached) { continue }  # never attach a monitor that's off
+      $modeOff = $o.W -ne $e.W -or $o.H -ne $e.H -or ($e.Hz -and $o.Hz -lt $e.Hz)
+      if ($modeOff -or $o.X -ne $e.X -or $o.Y -ne $e.Y -or ($e.Primary -and -not $o.Primary)) {
+        $f = $DM_POSITION; if ($modeOff) { $f = $f -bor $DM_W -bor $DM_H -bor $DM_FREQ }
+        $entries += @{ Name = $o.Name; Fields = $f; X = $e.X; Y = $e.Y; W = $e.W; H = $e.H; Hz = $e.Hz; Primary = [bool]$e.Primary }
+      }
+    }
+    $right = ($b | ForEach-Object { $_.X + $_.W } | Measure-Object -Maximum).Maximum
+  } else {
+    $right = ($os | Where-Object { $_.Attached -and -not $_.Virtual } | ForEach-Object { $_.X + $_.W } | Measure-Object -Maximum).Maximum
+  }
+  if ($spec) {
+    $x = $right
+    foreach ($col in $spec.Split('|')) {
+      $y = 0; $cw = 0
+      foreach ($id in $col.Split(',')) {
+        $o = $map[$id]
+        if (-not $o) { continue }
+        if ($o.X -ne $x -or $o.Y -ne $y) { $entries += @{ Name = $o.Name; Fields = $DM_POSITION; X = $x; Y = $y; Primary = $false } }
+        $y += $o.H; $cw = [Math]::Max($cw, $o.W)
+      }
+      $x += $cw
+    }
+  }
+  $entries
+}
+
+# Leftover virtual monitors (Vibepollo 2.0.0 sometimes keeps one after its stream ended): with an
+# API token (vibepollo.token; scope POST /api/display/terminate_virtual), ask Vibepollo to remove
+# them once the Frame has said "no monitors" for 30 s.
+function Terminate-Virtual {
+  $tf = Join-Path $Data 'vibepollo.token'
+  if (-not (Test-Path $tf)) { Log 'leftover virtual monitor; no vibepollo.token, so left alone (stream.sh cleanup on the Frame clears it)'; return }
+  try {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    [Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }  # localhost, self-signed
+    $r = Invoke-RestMethod -Method Post -Uri 'https://localhost:47990/api/display/terminate_virtual' -ContentType 'application/json' `
+      -Body '{}' -Headers @{ Authorization = 'Bearer ' + (Get-Content $tf -Raw).Trim() } -TimeoutSec 20
+    Log ('leftover virtual monitor: Vibepollo terminate_virtual: ' + (ConvertTo-Json -InputObject $r -Compress))
+  } catch { Log "leftover virtual monitor: Vibepollo terminate_virtual failed: $_" }
 }
 
 # ---- the link ------------------------------------------------------------------------------
@@ -287,31 +338,44 @@ if (-not $Run) { Get-Help $MyInvocation.MyCommand.Path; exit 0 }
 Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -ne $PID -and $_.Name -eq 'powershell.exe' -and $_.CommandLine -like '*ftrd-host.ps1*-Run*' } |
   ForEach-Object { Log "stopping an older agent ($($_.ProcessId))"; Stop-Process -Id $_.ProcessId -Force }
 $key = Get-Key
-if (-not $key) { Log 'no link key: run ftrd-host.ps1 -Setup (virtual monitors get a plain row until then)' }
+if (-not $key) { Log 'no link key: run ftrd-host.ps1 -Setup (only the physical layout is kept until then)' }
 Log ("agent running; frame " + ($Frame -join ',') + " port $Port")
-$mons = @(); $lastAsk = Get-Date '2000-01-01'; $lastFix = Get-Date '2000-01-01'; $seen = ''; $since = Get-Date; $monsSeen = ''
+$mons = @(); $known = $false        # last answer's monitors; whether we've had one
+$accepted = ''; $cand = ''; $candSince = Get-Date
+$busyUntil = Get-Date '2000-01-01'; $lastFix = Get-Date '2000-01-01'
+$seen = ''; $since = Get-Date; $noneSince = $null; $orphanDone = $false
 while ($true) {
   Start-Sleep -Milliseconds 1000
-  if ($key -and ((Get-Date) - $lastAsk).TotalSeconds -ge 2) {
-    $lastAsk = Get-Date
+  $now = Get-Date
+  if ($key) {
     $a = Ask-Frame $key
     if ($a) {
-      $mons = @($a.Monitors)
-      $sig = ($mons | ForEach-Object { '{0}:{1}x{2}@{3}' -f $_.instance, $_.w, $_.h, $(if ($null -ne $_.az) { [Math]::Round([double]$_.az / 5) * 5 } else { '-' }) }) -join ' '
-      if ($sig -ne $monsSeen) { $monsSeen = $sig; Log "Frame: $(if ($sig) { $sig } else { 'no monitors' })"; $since = Get-Date '2000-01-01' }
+      $mons = @($a.Monitors); $known = $true
+      if ($mons | Where-Object { $_.busy }) { $busyUntil = $now.AddSeconds(6) }  # a monitor is (re)starting
+      $ls = Layout-Spec $mons
+      if ($ls.Spec -ne $cand) { $cand = $ls.Spec; $candSince = $now }
+      # Take a new arrangement once the panels have stopped moving (4 s), and only when it's
+      # clear-cut: neighbouring columns at least 8 degrees apart.
+      if ($cand -ne $accepted -and ($now - $candSince).TotalSeconds -ge 4 -and ($ls.MinGap -ge 8 -or -not $accepted -or $accepted.Split('|,').Count -ne $cand.Split('|,').Count)) {
+        Log ("Frame arrangement: " + $(if ($cand) { $cand.Replace('|', ' | ') } else { 'no monitors' }) + $(if ($accepted) { " (was $($accepted.Replace('|', ' | ')))" } else { '' }))
+        $accepted = $cand
+      }
     }
   }
-  # Act once the displays have been wrong and stable for 3 s (Vibepollo is mid-change otherwise).
+  if ($known -and $mons.Count -eq 0) { if (-not $noneSince) { $noneSince = $now } } else { $noneSince = $null; $orphanDone = $false }
+
+  # Act only on settled displays: unchanged for 5 s, no monitor (re)starting, 8 s since our last change.
   $os = Outputs
   $d = Describe $os
-  if ($d -ne $seen) { $seen = $d; $since = Get-Date; continue }
-  if (((Get-Date) - $since).TotalSeconds -lt 3 -or ((Get-Date) - $lastFix).TotalSeconds -lt 5) { continue }
-  $b = Get-Baseline
-  $right = if ($b) { ($b | ForEach-Object { $_.X + $_.W } | Measure-Object -Maximum).Maximum } else {
-    ($os | Where-Object { $_.Attached -and -not $_.Virtual } | ForEach-Object { $_.X + $_.W } | Measure-Object -Maximum).Maximum }
-  $plan = @(Plan-Virtual $mons $os $right)
-  if (-not (Physical-Matches $os) -or ($plan -and -not (Plan-Matches $plan $os))) {
-    $lastFix = Get-Date
-    Restore-Physical 'layout: physical as the baseline, virtual monitors right of them as on the Frame' $plan
+  if ($d -ne $seen) { $seen = $d; $since = $now; continue }
+  if (($now - $since).TotalSeconds -lt 5 -or $now -lt $busyUntil -or ($now - $lastFix).TotalSeconds -lt 8) { continue }
+  if ($noneSince -and -not $orphanDone -and ($now - $noneSince).TotalSeconds -ge 30 -and ($os | Where-Object { $_.Attached -and $_.Virtual })) {
+    $orphanDone = $true; Terminate-Virtual; continue
+  }
+  $map = if ($mons.Count) { Resolve-Displays $mons $os } else { @{} }
+  $changes = @(Layout-Changes $os $(if ($mons.Count) { $accepted } else { '' }) $map)
+  if ($changes.Count) {
+    $lastFix = $now
+    [void](Apply-Batch $changes 'layout')
   }
 }

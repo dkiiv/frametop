@@ -15,6 +15,8 @@
 #pragma once
 #include <linux/input-event-codes.h>
 #include <sys/eventfd.h>
+#include <sys/mman.h>
+#include <unistd.h>
 #include <wayland-client.h>
 
 #include <deque>
@@ -35,6 +37,7 @@ struct Wl {
     xdg_wm_base *wm = nullptr;
     zwp_linux_dmabuf_v1 *dmabuf = nullptr;
     wp_viewporter *vp = nullptr;
+    wl_shm *shm = nullptr;
     zxdg_decoration_manager_v1 *decoMgr = nullptr;
     wl_seat *seat = nullptr;
     wl_pointer *ptr = nullptr;
@@ -263,6 +266,7 @@ void RegGlobal(void *, wl_registry *r, uint32_t name, const char *iface, uint32_
     else if (i == zwp_linux_dmabuf_v1_interface.name) g_wl.dmabuf = static_cast<zwp_linux_dmabuf_v1 *>(wl_registry_bind(r, name, &zwp_linux_dmabuf_v1_interface, std::min(ver, 3u)));
     else if (i == wp_viewporter_interface.name) g_wl.vp = static_cast<wp_viewporter *>(wl_registry_bind(r, name, &wp_viewporter_interface, 1));
     else if (i == zxdg_decoration_manager_v1_interface.name) g_wl.decoMgr = static_cast<zxdg_decoration_manager_v1 *>(wl_registry_bind(r, name, &zxdg_decoration_manager_v1_interface, 1));
+    else if (i == wl_shm_interface.name) g_wl.shm = static_cast<wl_shm *>(wl_registry_bind(r, name, &wl_shm_interface, 1));
     else if (i == wl_seat_interface.name) g_wl.seat = static_cast<wl_seat *>(wl_registry_bind(r, name, &wl_seat_interface, std::min(ver, 5u)));
 }
 void RegRemove(void *, wl_registry *, uint32_t) {}
@@ -308,6 +312,27 @@ bool WlInit(int streamW, int streamH, int winW, int winH, const char *appId, con
     wl_surface_commit(g_wl.surf);
     g_wl.efd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
     wl_display_roundtrip(g_wl.dpy);
+    // Map the window now with a dark placeholder (one pixel, scaled), so Frametop can float and
+    // size it before the stream starts; the stream then starts at the panel's size.
+    if (g_wl.shm) {
+        const int fd = memfd_create("ftrd-placeholder", MFD_CLOEXEC);
+        if (fd >= 0 && ftruncate(fd, 4) == 0) {
+            if (void *px = mmap(nullptr, 4, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0); px != MAP_FAILED) {
+                *static_cast<uint32_t *>(px) = 0xff181818;
+                munmap(px, 4);
+                wl_shm_pool *pool = wl_shm_create_pool(g_wl.shm, fd, 4);
+                wl_buffer *b = wl_shm_pool_create_buffer(pool, 0, 1, 1, 4, WL_SHM_FORMAT_XRGB8888);
+                wl_shm_pool_destroy(pool);
+                wl_surface_attach(g_wl.surf, b, 0, 0);
+                wl_surface_damage_buffer(g_wl.surf, 0, 0, 1, 1);
+                const int w = g_wl.winW ? g_wl.winW : winW, h = g_wl.winH ? g_wl.winH : winH;
+                wp_viewport_set_destination(g_wl.view, w, h);
+                wl_surface_commit(g_wl.surf);
+                wl_display_roundtrip(g_wl.dpy);
+            }
+        }
+        if (fd >= 0) close(fd);
+    }
     printf("window: connected to %s, default size %dx%d\n", getenv("WAYLAND_DISPLAY") ?: "wayland-0", winW, winH);
     return true;
 }

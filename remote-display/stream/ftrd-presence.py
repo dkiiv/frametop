@@ -106,7 +106,8 @@ def snapshot():
     mons = []
     for st in insts:
         m = {"instance": st["instance"], "cert_sha256": cert_sha256(st.get("keys", "")), "app": st.get("app", ""),
-             "w": st.get("w", 0), "h": st.get("h", 0), "suspended": bool(st.get("suspended"))}
+             "w": st.get("w", 0), "h": st.get("h", 0), "suspended": bool(st.get("suspended")),
+             "busy": bool(st.get("busy"))}
         n = where.get(st.get("wl_id", ""))
         p = pose(n) if n else None
         if p and h:
