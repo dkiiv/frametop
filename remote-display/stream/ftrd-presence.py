@@ -12,6 +12,12 @@ The signature is RSA-SHA256 over nonce + json with this Frame's Vibepollo pairin
 1's key.pem), so the PC agent checks it against the certificate Vibepollo already trusts: no
 extra key to copy.
 
+While `stream.sh setup` pairs a monitor it writes ~/.cache/frametop-remote-display/pairing.json
+({"name", "pin"}); then the reply is `FTRD2-PAIR {"name", "pin", "frame"}` (nothing to sign
+with yet): the PIN the pairing request waits for. The PC agent hands it to Vibepollo (after
+asking, outside its pairing window). Each ping is noted in ping.txt, so setup can tell the
+PC helper is there.
+
 State comes from the instances' FTRD_STATE_FILEs (~/.cache/frametop-remote-display/
 stream-N.state, written by ftrd-stream), panel poses from ft-screens (@ft_screens "get N",
 "head") and which panel holds which window from ft-floatd (@frametop_float "list apps").
@@ -123,6 +129,20 @@ def snapshot():
     return mons
 
 
+PAIRING = os.path.join(CACHE, "pairing.json")
+
+
+def pairing():
+    """The pairing in progress (setup), if any and fresh."""
+    try:
+        if time.time() - os.path.getmtime(PAIRING) > 300:
+            return None
+        p = json.load(open(PAIRING))
+        return {"name": str(p["name"]), "pin": str(p["pin"]), "frame": socket.gethostname()}
+    except (OSError, ValueError, KeyError):
+        return None
+
+
 def sign(data):
     r = subprocess.run(["openssl", "dgst", "-sha256", "-sign", os.path.join(KEYDIR, "key.pem")],
                        input=data, capture_output=True, timeout=5)
@@ -130,9 +150,6 @@ def sign(data):
 
 
 def main():
-    cert = cert_sha256(KEYDIR)
-    if not cert or not os.path.exists(os.path.join(KEYDIR, "key.pem")):
-        sys.exit(f"ftrd-presence: no paired identity in {KEYDIR} (stream.sh setup)")
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
@@ -147,10 +164,10 @@ def main():
         now = time.monotonic()
         if now - cache_t > 0.5:
             cache, cache_t = snapshot(), now
-            if cache:
+            if cache or pairing():
                 last_seen = now
         if not cache and now - last_seen > LINGER:
-            log("no instances left; exiting")
+            log("no instances or pairing left; exiting")
             return
         try:
             data, peer = s.recvfrom(512)
@@ -164,6 +181,18 @@ def main():
         except ValueError:
             continue
         if not 8 <= len(nonce) <= 64:
+            continue
+        try:
+            with open(os.path.join(CACHE, "ping.txt"), "w") as f:
+                f.write(f"{time.time():.0f} {peer[0]}\n")
+        except OSError:
+            pass
+        pair = pairing()
+        if pair:
+            s.sendto(("FTRD2-PAIR " + json.dumps(pair, separators=(",", ":"))).encode(), peer)
+            continue
+        cert = cert_sha256(KEYDIR)
+        if not cert:
             continue
         body = json.dumps({"v": 2, "t": time.time(), "monitors": cache}, separators=(",", ":"))
         sig = sign(nonce + body.encode())

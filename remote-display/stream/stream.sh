@@ -10,7 +10,8 @@
 #   stream.sh float [N]                         instance N as a Vibepollo "Remote Monitor" (a virtual
 #                                               monitor on the PC) in its own Frametop panel; resizing
 #                                               the panel resizes the monitor
-#   stream.sh float-all                         every paired identity's monitor (the "Remote PC" entry)
+#   stream.sh open                              the "Remote PC" entry: float-all, or setup in a terminal first
+#   stream.sh float-all                         every paired identity's monitor
 #   stream.sh cleanup                           clear virtual monitors Vibepollo kept after release
 #   stream.sh presence                          what the PC agent gets (monitor arrangement)
 #   stream.sh install-desktop                   the desktop files ft-float launch needs
@@ -22,6 +23,16 @@ set -uo pipefail
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 root=$(cd "$here/../.." && pwd)
 if [ ! -e /run/.containerenv ] && [ ! -e /.dockerenv ]; then
+  # "Remote PC" in the menu: the monitors, or the first time, setup in a terminal window.
+  if [ "${1:-}" = open ]; then
+    if [ -f "$HOME/.config/frametop-remote-display/uniqueid.dat" ]; then exec "$0" float-all; fi
+    run="'$here/stream.sh' setup && '$here/stream.sh' float-all; echo; echo 'This window closes in a minute.'; sleep 60"
+    for t in konsole xterm; do
+      command -v $t >/dev/null && exec $t -e bash -c "$run"
+    done
+    notify-send -a "Remote PC" "Remote PC" "Set it up first: run $here/stream.sh setup in a terminal" 2>/dev/null
+    exit 1
+  fi
   # First-time setup builds first (build.sh enters the container itself).
   if [ "${1:-}" = setup ] && [ ! -x "$here/build/ftrd-stream" ]; then
     echo "== building ftrd-stream (first time: a few minutes)"
@@ -128,25 +139,36 @@ case ${1:-status} in
     python3 "$here/ftrd-find-pc.py" --remember "$h" >/dev/null ||
       { echo "no Vibepollo answering at $h (is it installed and running? same network?)"; exit 1; }
     echo "== PC: $h"
+    # The PC helper (remote-display/host, ftrd-host.ps1 -Install) approves the pairing: it asks
+    # ftrd-presence, which hands it the PIN from pairing.json.
+    if ! pgrep -f "ftrd-presenc[e].py" >/dev/null; then
+      setsid nohup python3 "$here/ftrd-presence.py" >>"$dir/presence.log" 2>&1 < /dev/null &
+    fi
+    helper() { [ -f "$dir/ping.txt" ] && [ $(( $(date +%s) - $(cut -d' ' -f1 "$dir/ping.txt") )) -lt 15 ]; }
     for n in $(seq 1 "$count"); do
       k=$(keys "$n")
       if [ -f "$k/uniqueid.dat" ] && "$bin" --keys "$k" --host "$h" --check >/dev/null 2>&1; then
         echo "== monitor $n: already paired"; continue
       fi
       pin=$(printf '%04d' $((RANDOM % 10000)))
+      printf '{"name": "Frame monitor %s", "pin": "%s"}\n' "$n" "$pin" > "$dir/pairing.json"
       echo
-      echo "== monitor $n: pair it. On the PC, open https://localhost:47990 -> PIN, enter $pin, name it \"Frame monitor $n\"."
+      echo "== monitor $n: pairing (PIN $pin)"
+      echo "   With the Remote PC helper on the PC, this happens by itself in a few seconds (or it asks"
+      echo "   you on the PC's screen). Without it: on the PC, open https://localhost:47990 -> PIN,"
+      echo "   enter $pin and name it \"Frame monitor $n\"."
       mkdir -p "$k"; chmod 700 "$k"
-      "$bin" --keys "$k" --host "$h" --pair "$pin" | grep -v "^pairing:" || { echo "pairing failed; run stream.sh setup again"; exit 1; }
-      if [ "$n" -gt 1 ]; then
+      "$bin" --keys "$k" --host "$h" --pair "$pin" | grep -v "^pairing:" || { rm -f "$dir/pairing.json"; echo "pairing failed; run setup again"; exit 1; }
+      rm -f "$dir/pairing.json"
+      if [ "$n" -gt 1 ] && ! helper; then
         echo "   Vibepollo gives full rights only to the first device: in the web UI -> Clients, give"
         echo "   \"Frame monitor $n\" the Launch and input (mouse, keyboard) permissions too."
       fi
     done
     "$0" install-desktop >/dev/null
     echo
-    echo "== done. In the headset: Steam button -> + -> Remote PC."
-    echo "   On the PC, for monitors placed as on the Frame: ftrd-host.ps1 -Install (remote-display/host)." ;;
+    echo "== done. Remote PC is in the Steam menu (Steam button -> +)."
+    helper || echo "   Tip: the PC helper (remote-display/host) places the monitors as on the Frame and pairs for you." ;;
   float)  # ft-floatd floats the window whose app id matches the desktop file
     exec "$root/float/ft-float" launch "org.frametop.RemoteMonitor${2:-1}" ;;
   float-all)  # every paired identity's monitor, one after the other (the host starts one at a time)
@@ -190,8 +212,8 @@ case ${1:-status} in
       hidden "Remote PC $n" "org.frametop.RemoteMonitor$n" \
         "$s on -i $n --window --app 'Remote Monitor' --size 2560x1440 --wl-id org.frametop.RemoteMonitor$n --title 'Remote PC $n'"
     done
-    printf '[Desktop Entry]\nType=Application\nName=Remote PC\nComment=Your Windows PC'"'"'s virtual monitors, each in its own panel\nExec=sh -c "%s float-all"\nIcon=preferences-desktop-remote-desktop\nTerminal=false\nCategories=Network;RemoteAccess;\n' \
+    printf '[Desktop Entry]\nType=Application\nName=Remote PC\nComment=Your Windows PC'"'"'s virtual monitors, each in its own panel\nExec=sh -c "%s open"\nIcon=preferences-desktop-remote-desktop\nTerminal=false\nCategories=Network;RemoteAccess;\n' \
       "$s" > "$apps/org.frametop.RemotePC.desktop"
     echo "shown: Remote PC; hidden: $(cd "$apps" && grep -l NoDisplay=true org.frametop.Remote*.desktop | tr '\n' ' ')" ;;
-  *) echo "usage: stream.sh on [-i N] [opts]|off [N|all]|status|log [N]|setup [N] [PC]|pair [-i N] PIN|float [N]|float-all|cleanup|install-desktop"; exit 2 ;;
+  *) echo "usage: stream.sh on [-i N] [opts]|off [N|all]|status|log [N]|setup [N] [PC]|pair [-i N] PIN|open|float [N]|float-all|cleanup|install-desktop"; exit 2 ;;
 esac

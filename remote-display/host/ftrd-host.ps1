@@ -11,20 +11,29 @@ Keeps the PC's display layout the way you want it while the Steam Frame shows vi
     (asked every second). A new arrangement is taken once the panels have stood still for 4 s
     and only when clear-cut (8 degree deadzone); Windows is changed only when its displays have
     been settled for 5 s and no monitor is (re)starting, and only for what differs;
-  - optionally removes a virtual monitor Vibepollo left behind (Frame says "no monitors" for
-    30 s), with a Vibepollo API token in vibepollo.token.
+  - pairs the Frame: a Frame being set up asks the PC (pairing request with its PIN), and the
+    agent hands the PIN to Vibepollo and gives the device the permissions Remote PC needs
+    (launch, mouse, keyboard). For 30 minutes after -Install (or -AllowPairing) without asking;
+    otherwise it asks on screen;
+  - removes a virtual monitor Vibepollo left behind (Frame says "no monitors" for 30 s).
 
-Usage (PowerShell 5.1, as the logged-in user; no admin needed):
-  ftrd-host.ps1 -Install          save the current physical layout, run now and at every logon
-  ftrd-host.ps1 -Uninstall        stop it and remove it from logon
+Usage (Windows PowerShell 5.1, as the logged-in user):
+  ftrd-host.ps1 -Install          everything for Remote PC on this PC: Vibepollo (downloaded and
+                                  installed if missing; one UAC prompt), its login and an API token
+                                  for this helper, the current physical layout saved; runs now and
+                                  at every logon; pairing open for 30 minutes
+  ftrd-host.ps1 -AllowPairing     let a Frame pair without asking, for the next 15 minutes
+  ftrd-host.ps1 -ShowLogin        the Vibepollo web page login -Install made
+  ftrd-host.ps1 -Uninstall        stop it and remove it from logon (Vibepollo stays)
   ftrd-host.ps1 -SaveBaseline     save the current physical layout as the one to keep
   ftrd-host.ps1 -Status           displays, baseline, the Frame's answer
   ftrd-host.ps1 -Restore          physical monitors back to the baseline now
   ftrd-host.ps1 -Run              the agent (Startup folder)
-Data folder: %LOCALAPPDATA%\ftrd (ftrd-host.ps1, baseline.json, frame.txt, vibepollo.token (optional),
-ftrd-host.log). The Frame's answers are signed with its Vibepollo pairing key; nothing to copy.
+Data folder: %LOCALAPPDATA%\ftrd (ftrd-host.ps1, baseline.json, frame.txt, vibepollo.token.dpapi and
+vibepollo-login.dpapi (encrypted for this Windows user), pair-until, ftrd-host.log). The Frame's
+answers are signed with its Vibepollo pairing key; nothing to copy.
 #>
-param([switch]$Install, [switch]$Uninstall, [switch]$SaveBaseline, [switch]$Status, [switch]$Restore, [switch]$Run,
+param([switch]$Install, [switch]$AllowPairing, [switch]$ShowLogin, [switch]$Uninstall, [switch]$SaveBaseline, [switch]$Status, [switch]$Restore, [switch]$Run,
       [string[]]$Frame = @(), [int]$Port = 47810,
       [string]$VibepolloConfig = 'C:\Program Files\Sunshine\config')
 $ErrorActionPreference = 'Continue'
@@ -273,19 +282,96 @@ function Layout-Changes($os, $spec, $map) {
   $entries
 }
 
-# Leftover virtual monitors (Vibepollo 2.0.0 sometimes keeps one after its stream ended): with an
-# API token (vibepollo.token; scope POST /api/display/terminate_virtual), ask Vibepollo to remove
-# them once the Frame has said "no monitors" for 30 s.
-function Terminate-Virtual {
-  $tf = Join-Path $Data 'vibepollo.token'
-  if (-not (Test-Path $tf)) { Log 'leftover virtual monitor; no vibepollo.token, so left alone (stream.sh cleanup on the Frame clears it)'; return }
+# ---- Vibepollo's API -----------------------------------------------------------------------
+$VpUrl = 'https://localhost:47990'
+$VpSetupUrl = 'https://github.com/Nonary/Vibepollo/releases/download/2.0.0/VibepolloSetup-v2.0.0.exe'
+$VpSetupSha256 = '7b3500ec0c774644ce5a435a48f61c046c48494d0f18b67afa0b3561931794b7'
+# Remote PC needs: list + view + launch apps, mouse, keyboard, controller (Vibepollo gives them
+# only to the first device it pairs).
+$PermWanted = [uint32](0x01000000 -bor 0x02000000 -bor 0x04000000 -bor 0x800 -bor 0x1000 -bor 0x100)
+function Save-Secret($name, $plain) {
+  ConvertTo-SecureString $plain -AsPlainText -Force | ConvertFrom-SecureString | Set-Content (Join-Path $Data $name)
+}
+function Read-Secret($name) {
+  $f = Join-Path $Data $name
+  if (-not (Test-Path $f)) { return $null }
   try {
-    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    [Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }  # localhost, self-signed
-    $r = Invoke-RestMethod -Method Post -Uri 'https://localhost:47990/api/display/terminate_virtual' -ContentType 'application/json' `
-      -Body '{}' -Headers @{ Authorization = 'Bearer ' + (Get-Content $tf -Raw).Trim() } -TimeoutSec 20
-    Log ('leftover virtual monitor: Vibepollo terminate_virtual: ' + (ConvertTo-Json -InputObject $r -Compress))
-  } catch { Log "leftover virtual monitor: Vibepollo terminate_virtual failed: $_" }
+    $ss = Get-Content $f -Raw | ConvertTo-SecureString
+    [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($ss))
+  } catch { $null }
+}
+function Vp($method, $path, $body, $auth) {
+  [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+  [Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }  # localhost, self-signed
+  $p = @{ Method = $method; Uri = "$VpUrl$path"; TimeoutSec = 20; UseBasicParsing = $true }
+  if ($auth) { $p.Headers = @{ Authorization = $auth } }
+  if ($null -ne $body) { $p.ContentType = 'application/json'; $p.Body = (ConvertTo-Json -InputObject $body -Depth 10 -Compress) }
+  Invoke-RestMethod @p
+}
+function Vp-Auth {
+  $t = Read-Secret 'vibepollo.token.dpapi'
+  if (-not $t -and (Test-Path (Join-Path $Data 'vibepollo.token'))) { $t = (Get-Content (Join-Path $Data 'vibepollo.token') -Raw).Trim() }
+  if ($t) { 'Bearer ' + $t } else { $null }
+}
+
+# Leftover virtual monitors (Vibepollo 2.0.0 sometimes keeps one after its stream ended): ask
+# Vibepollo to remove them once the Frame has said "no monitors" for 30 s.
+function Terminate-Virtual {
+  $auth = Vp-Auth
+  if (-not $auth) { Log 'leftover virtual monitor; no Vibepollo token, so left alone (stream.sh cleanup on the Frame clears it)'; return }
+  try { Log ('leftover virtual monitor: Vibepollo terminate_virtual: ' + (ConvertTo-Json -InputObject (Vp Post '/api/display/terminate_virtual' @{} $auth) -Compress)) }
+  catch { Log "leftover virtual monitor: Vibepollo terminate_virtual failed: $_" }
+}
+
+# Pairing. A Frame being set up answers our pings with FTRD2-PAIR {name, pin}; that's the PIN its
+# pairing request to Vibepollo waits for. Approved without asking while pair-until is in the
+# future (-Install, -AllowPairing), else after a Yes on screen. Then the device gets $PermWanted.
+$script:pairSeen = @{}; $script:permTodo = @{}
+function Pairing-Open {
+  $f = Join-Path $Data 'pair-until'
+  if (-not (Test-Path $f)) { return $false }
+  try { return [datetime]::FromFileTimeUtc([int64](Get-Content $f -Raw).Trim()) -gt [datetime]::UtcNow } catch { return $false }
+}
+function Open-Pairing($minutes) { Set-Content (Join-Path $Data 'pair-until') ([datetime]::UtcNow.AddMinutes($minutes).ToFileTimeUtc()) }
+function Handle-Pair($req, $from) {
+  if (-not $req.pin -or $req.pin -notmatch '^\d{4}$' -or -not $req.name) { return }
+  $key = "$($req.pin)/$($req.name)"
+  if ($script:pairSeen.ContainsKey($key)) { return }
+  $script:pairSeen[$key] = Get-Date
+  $auth = Vp-Auth
+  if (-not $auth) { Log "pairing request from $from ('$($req.name)'): no Vibepollo token here, so the PIN goes in by hand"; return }
+  if (-not (Pairing-Open)) {
+    Add-Type -AssemblyName System.Windows.Forms
+    $ans = [Windows.Forms.MessageBox]::Show("A Steam Frame at $from wants to pair with this PC as `"$($req.name)`" (Remote PC).`n`nThe headset shows PIN $($req.pin). Allow it?",
+      'Remote PC', 'YesNo', 'Question', 'Button2', 'DefaultDesktopOnly')
+    if ($ans -ne 'Yes') { Log "pairing request from $from ('$($req.name)') declined"; return }
+  }
+  try { $r = Vp Post '/api/pin' @{ pin = [string]$req.pin; name = [string]$req.name } $auth }
+  catch { Log "pairing '$($req.name)': Vibepollo refused the PIN: $_"; $script:pairSeen.Remove($key); return }
+  if (-not $r.status) { Log "pairing '$($req.name)': no pairing request waiting for PIN $($req.pin) yet; will retry"; $script:pairSeen.Remove($key); return }
+  Log "paired '$($req.name)' ($from)"
+  $script:permTodo[[string]$req.name] = (Get-Date).AddSeconds(60)
+}
+function Fix-Permissions {
+  if (-not $script:permTodo.Count) { return }
+  $auth = Vp-Auth
+  try { $list = Vp Get '/api/clients/list' $null $auth } catch { return }
+  foreach ($name in @($script:permTodo.Keys)) {
+    $c = @($list.named_certs) | Where-Object { $_.name -eq $name } | Select-Object -Last 1
+    if (-not $c) {
+      if ((Get-Date) -gt $script:permTodo[$name]) { Log "permissions for '$name': device not in Vibepollo's list; gave up"; $script:permTodo.Remove($name) }
+      continue
+    }
+    $want = [uint32]$c.perm -bor $PermWanted
+    if ($want -ne [uint32]$c.perm) {
+      $body = @{}
+      foreach ($pr in $c.PSObject.Properties) { if ($pr.Name -ne 'last_seen') { $body[$pr.Name] = $pr.Value } }
+      $body.perm = $want
+      try { [void](Vp Post '/api/clients/update' $body $auth); Log "permissions for '$name': launch, mouse, keyboard" }
+      catch { Log "permissions for '$name' failed: $_"; continue }
+    }
+    $script:permTodo.Remove($name)
+  }
 }
 
 # ---- the link ------------------------------------------------------------------------------
@@ -324,6 +410,10 @@ function Ask-Frame {
     while ((Get-Date) -lt $until) {
       $ep = New-Object Net.IPEndPoint([Net.IPAddress]::Any, 0)
       try { $reply = [Text.Encoding]::UTF8.GetString($u.Receive([ref]$ep)) } catch { break }
+      if ($reply.StartsWith('FTRD2-PAIR ')) {
+        try { Handle-Pair ($reply.Substring(11) | ConvertFrom-Json) $ep.Address.ToString() } catch { Log "pairing request: $_" }
+        continue
+      }
       $nl = $reply.LastIndexOf("`n")
       if (-not $reply.StartsWith('FTRD2 ') -or $nl -lt 0) { continue }
       $body = $reply.Substring(6, $nl - 6); $tail = $reply.Substring($nl + 1).Trim().Split(' ')
@@ -350,20 +440,71 @@ $script:lastFound = Get-Date '2000-01-01'
 
 # ---- commands ------------------------------------------------------------------------------
 if ($Install) {
-  # Copy to the data folder, save the layout, start at logon (Startup folder), start now.
   $dest = Join-Path $Data 'ftrd-host.ps1'
   if ($MyInvocation.MyCommand.Path -ne $dest) { Copy-Item -Force $MyInvocation.MyCommand.Path $dest }
-  if (-not (Test-Path (Join-Path $VibepolloConfig 'sunshine_state.json'))) { Log "warning: no Vibepollo at $VibepolloConfig (install it first, or pass -VibepolloConfig)" }
+  Write-Host "`n== Vibepollo (streams your PC's virtual monitors to the Frame)"
+  if (-not (Get-Service ApolloService -ErrorAction SilentlyContinue)) {
+    $exe = Join-Path $env:TEMP 'VibepolloSetup-v2.0.0.exe'
+    Write-Host "downloading Vibepollo 2.0.0..."
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    Invoke-WebRequest -UseBasicParsing $VpSetupUrl -OutFile $exe
+    if ((Get-FileHash -Algorithm SHA256 $exe).Hash.ToLower() -ne $VpSetupSha256) { Remove-Item $exe; throw "the Vibepollo download doesn't match its checksum; not installing it" }
+    Write-Host "installing it: click Yes in the Windows prompt (it installs a service and display drivers)..."
+    $pr = Start-Process -FilePath $exe -ArgumentList '/quiet', '/norestart' -Verb RunAs -Wait -PassThru
+    Log "Vibepollo setup exit code $($pr.ExitCode)"
+    Remove-Item $exe -ErrorAction SilentlyContinue
+  } else { Write-Host "already installed" }
+  $up = $false
+  for ($i = 0; $i -lt 60 -and -not $up; $i++) { try { [void](Invoke-WebRequest -UseBasicParsing -TimeoutSec 3 'http://localhost:47989/serverinfo'); $up = $true } catch { Start-Sleep 2 } }
+  if (-not $up) { throw "Vibepollo isn't answering (service ApolloService). Check it's running, then run this again." }
+
+  Write-Host "`n== Vibepollo login and an API token for this helper"
+  $auth = Vp-Auth
+  $ok = $false
+  if ($auth) { try { [void](Vp Get '/api/clients/list' $null $auth); $ok = $true } catch {} }
+  if (-not $ok) {
+    $user = 'admin'
+    $chars = [char[]]'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+    $bytes = New-Object byte[] 16; [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+    $pass = -join ($bytes | ForEach-Object { $chars[$_ % $chars.Length] })
+    $fresh = $false
+    try { $r = Vp Post '/api/password' @{ newUsername = $user; newPassword = $pass; confirmNewPassword = $pass } $null; $fresh = [bool]$r.status } catch {}
+    if ($fresh) {
+      Save-Secret 'vibepollo-login.dpapi' "$user`n$pass"
+      Write-Host "made the login for Vibepollo's web page (you rarely need it): user $user, password $pass"
+      Write-Host "(ftrd-host.ps1 -ShowLogin shows it again)"
+    } else {
+      Write-Host "Vibepollo already has a login: enter it once, so this helper can make its own API token."
+      $cred = Get-Credential -Message 'Your Vibepollo web page login (https://localhost:47990)'
+      if (-not $cred) { throw 'no login given' }
+      $user = $cred.UserName; $pass = $cred.GetNetworkCredential().Password
+    }
+    $basic = 'Basic ' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("$user`:$pass"))
+    $scopes = @(@{ path = '/api/pin'; methods = @('POST') }, @{ path = '/api/clients/list'; methods = @('GET') },
+                @{ path = '/api/clients/update'; methods = @('POST') }, @{ path = '/api/display/terminate_virtual'; methods = @('POST') })
+    $t = Vp Post '/api/token' @{ scopes = $scopes } $basic
+    if (-not $t.token) { throw "Vibepollo didn't make an API token: $(ConvertTo-Json -InputObject $t -Compress)" }
+    Save-Secret 'vibepollo.token.dpapi' $t.token
+    Remove-Item (Join-Path $Data 'vibepollo.token') -ErrorAction SilentlyContinue
+    Write-Host "API token made (pairing, device permissions, leftover-monitor cleanup only)"
+  } else { Write-Host "already set up" }
+
+  Write-Host "`n== This helper"
   Save-Baseline
   $ps = "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe"
   $sc = (New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path ([Environment]::GetFolderPath('Startup')) 'ftrd-host.lnk'))
-  $sc.TargetPath = $ps; $sc.WindowStyle = 7; $sc.Description = 'Frametop remote display: keeps the PC display layout'
+  $sc.TargetPath = $ps; $sc.WindowStyle = 7; $sc.Description = 'Remote PC: pairs the Steam Frame, keeps the display layout'
   $sc.Arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$dest`" -Run"
   $sc.Save()
+  Open-Pairing 30
   Start-Process -WindowStyle Hidden -FilePath $ps -ArgumentList @('-NoProfile', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', $dest, '-Run')
-  Log "installed: $dest, started now and at every logon"
+  Log "installed: $dest, started now and at every logon; pairing open for 30 minutes"
+  Write-Host "`nThe PC is ready. In the headset: Steam button -> + -> Remote PC (within 30 minutes, it pairs"
+  Write-Host "by itself; later, this PC asks before a new Frame pairs)."
   exit 0
 }
+if ($AllowPairing) { Open-Pairing 15; Log 'pairing open for 15 minutes'; exit 0 }
+if ($ShowLogin) { $l = Read-Secret 'vibepollo-login.dpapi'; if ($l) { $u, $pw = $l -split "`n"; "Vibepollo web page (https://localhost:47990): user $u, password $pw" } else { 'no login saved here (it was made before this helper, or elsewhere)' }; exit 0 }
 if ($Uninstall) {
   Remove-Item (Join-Path ([Environment]::GetFolderPath('Startup')) 'ftrd-host.lnk') -ErrorAction SilentlyContinue
   Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -ne $PID -and $_.Name -eq 'powershell.exe' -and $_.CommandLine -like '*ftrd-host.ps1*-Run*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
@@ -409,6 +550,7 @@ while ($true) {
       }
     }
   }
+  Fix-Permissions
   if ($known -and $mons.Count -eq 0) { if (-not $noneSince) { $noneSince = $now } } else { $noneSince = $null; $orphanDone = $false }
 
   # Act only on settled displays: unchanged for 5 s, no monitor (re)starting, 8 s since our last change.

@@ -139,6 +139,15 @@ else
   echo "skipped. Install later with: setup/bluetooth/install.sh install"
 fi
 
+step "Remote PC (this fork): your Windows PC's monitors in Frametop panels"
+# Builds the client (moonlight-common-c is fetched at a pinned commit) and adds "Remote PC" to the
+# menu; the first click on it pairs with the PC (remote-display/README.md).
+if "$root/remote-display/stream/build.sh"; then
+  on_frame "remote-display/stream/stream.sh install-desktop" >/dev/null && echo "Remote PC is in the menu"
+else
+  echo "Remote PC didn't build; try again later with: remote-display/stream/build.sh"
+fi
+
 step "Done"
 cat <<'EOF'
 SteamVR has to restart once, to load the 3D mouse driver and to start the input relay
