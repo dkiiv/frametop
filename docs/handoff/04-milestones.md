@@ -91,7 +91,9 @@ Desktop Streamer uses it).
 - [ ] Frametop's keyboard doesn't open by itself for the stream window (no Wayland
       text-input; Windows fields can't signal focus). Today: a mapped controller button
       (Frametop Input Settings, keyboard toggle) or `vrkeyboard show` on @ft_screens. Better:
-      a host-side focus signal (Vibepollo/Sunshine) -> auto-open.
+      a host-side focus signal (Vibepollo/Sunshine) -> auto-open. Note: the controller's
+      system ("...") button can't be mapped (Frametop maps every button but that one; it's
+      SteamVR's dashboard toggle) — Curtis tried it on 2026-10-07; use another button.
 - [ ] Wrist pinning of the stream window untested (second controller was away).
 - [ ] Upstream the grab-bar hit-box fix (commit "screens: set controls' mouse scale...") to
       Frametop as its own PR.

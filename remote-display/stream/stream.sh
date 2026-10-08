@@ -85,7 +85,10 @@ case ${1:-status} in
     apps=$HOME/.local/share/applications
     mkdir -p "$apps"
     cp "$here/org.frametop.RemoteDisplay.desktop" "$apps/"
+    # One entry per paired identity (keys with a uniqueid); stale ones are removed.
+    rm -f "$apps"/org.frametop.RemoteMonitor*.desktop
     for n in 1 2 3 4; do
+      [ -f "$(keys "$n")/uniqueid.dat" ] || continue
       cat > "$apps/org.frametop.RemoteMonitor$n.desktop" <<EOF
 [Desktop Entry]
 Type=Application
@@ -98,6 +101,6 @@ Categories=Network;RemoteAccess;
 StartupWMClass=org.frametop.RemoteMonitor$n
 EOF
     done
-    echo "installed $apps/org.frametop.RemoteDisplay.desktop and org.frametop.RemoteMonitor{1..4}.desktop" ;;
+    echo "installed: $(cd "$apps" && ls org.frametop.Remote*.desktop | tr '\n' ' ')" ;;
   *) echo "usage: stream.sh on [-i N] [opts]|off [N|all]|status|log [N]|pair [-i N] PIN|float [N]|float-desktop|install-desktop"; exit 2 ;;
 esac
