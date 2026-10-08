@@ -36,18 +36,13 @@ way you like them before you run it: that's the layout the helper keeps.
 Everything on the Frame runs from the PC's PowerShell over SSH (Windows 10/11 has `ssh`
 built in), so you only put the headset on at the end.
 
-**Once, in the headset: turn SSH on.** Turn on developer mode in Steam's settings. Then Launch a
-program → Desktop, open the application menu → System → Konsole, and run (it asks you to choose
-a password for the headset's `steamos` user, then for that password again):
-```
-passwd
-sudo systemctl enable --now sshd
-ip -4 addr show wlan0 | grep inet
-```
-The last line shows the Frame's address on your Wi-Fi (`inet 192.168.x.y/24`: the part before
-the `/`). Use it as `FRAME` below. Keep the Frame on its charger or stand while installing: it
-goes to sleep after a while without input (Frametop Display Settings → Power, after the install,
-can keep it awake while plugged in).
+**Once, in the headset: turn SSH on.** No commands needed: in Steam's settings, turn on
+developer mode; then, in the developer settings, set the account password. That turns SSH on;
+log in as `steamos` with that password. You also need the Frame's address, `FRAME` below: its IP
+address on your Wi-Fi (the network's details in Steam's settings, or your router's list of
+devices), or `HOSTNAME.local` with the Frame's hostname (Windows finds that on the local network).
+Keep the Frame on its charger or stand while installing: it goes to sleep after a while without
+input (after the install, Frametop Display Settings → Power can keep it awake while plugged in).
 
 **Install Frametop with Remote PC:**
 ```
