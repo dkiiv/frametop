@@ -9,6 +9,7 @@
 #   stream.sh float [N]                         instance N as a Vibepollo "Remote Monitor" (a virtual
 #                                               monitor on the PC) in its own Frametop panel; resizing
 #                                               the panel resizes the monitor
+#   stream.sh float-all                         every paired identity's monitor (the "Remote PC" entry)
 #   stream.sh float-desktop                     the PC's own desktop (its physical monitors), floating
 #   stream.sh cleanup                           clear virtual monitors Vibepollo kept after release
 #   stream.sh presence                          the PC link's state (what the PC agent gets)
@@ -85,6 +86,13 @@ case ${1:-status} in
     exec "$bin" --keys "$(keys "$n")" --pair "$1" ;;
   float)  # ft-floatd floats the window whose app id matches the desktop file
     exec "$HOME/dev/frametop/float/ft-float" launch "org.frametop.RemoteMonitor${2:-1}" ;;
+  float-all)  # every paired identity's monitor, one after the other (the host starts one at a time)
+    for n in 1 2 3 4; do
+      [ -f "$(keys "$n")/uniqueid.dat" ] || continue
+      pidof_i "$n" >/dev/null && continue
+      "$HOME/dev/frametop/float/ft-float" launch "org.frametop.RemoteMonitor$n"
+      for _ in $(seq 1 60); do sleep 0.5; grep -q "connection started" "$dir/stream-$n.log" 2>/dev/null && break; done
+    done ;;
   float-desktop)
     exec "$HOME/dev/frametop/float/ft-float" launch org.frametop.RemoteDisplay ;;
   presence)
@@ -124,6 +132,17 @@ Categories=Network;RemoteAccess;
 StartupWMClass=org.frametop.RemoteMonitor$n
 EOF
     done
+    cat > "$apps/org.frametop.RemotePC.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Remote PC (all monitors)
+Comment=Frametop remote-display POC: every paired virtual monitor on the Windows PC, each in its own panel
+Exec=sh -c "\$HOME/dev/frametop/remote-display/stream/stream.sh float-all"
+Icon=preferences-desktop-remote-desktop
+Terminal=false
+Categories=Network;RemoteAccess;
+NoDisplay=false
+EOF
     echo "installed: $(cd "$apps" && ls org.frametop.Remote*.desktop | tr '\n' ' ')" ;;
-  *) echo "usage: stream.sh on [-i N] [opts]|off [N|all]|status|log [N]|pair [-i N] PIN|float [N]|float-desktop|cleanup|install-desktop"; exit 2 ;;
+  *) echo "usage: stream.sh on [-i N] [opts]|off [N|all]|status|log [N]|pair [-i N] PIN|float [N]|float-all|float-desktop|cleanup|install-desktop"; exit 2 ;;
 esac
