@@ -1,5 +1,10 @@
 # Frametop
 
+> **This is the dkiiv/frametop fork, branch `remote-display-poc-handoff`.** It adds **Remote PC**:
+> your Windows PC's monitors as virtual monitors in Frametop panels. To use it, install Frametop
+> from this branch, then follow [remote-display/README.md](remote-display/README.md). Everything
+> below is upstream Frametop's README.
+
 Frametop is a desktop for the Steam Frame that runs on the headset itself, with no PC. Put several monitors around you, pull app windows out to float on their own, and point with a mouse, or with your eyes.
 
 - **Screens that are real monitors.** Each KDE Plasma screen has its own resolution and shape: an ultrawide in front, portrait screens beside it. Move, resize, curve, and roll them, or pin one to your wrist or your head. They come back to your layout when the desktop starts.

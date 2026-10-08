@@ -13,15 +13,18 @@ edges elsewhere.
 
 ## What you need
 
-- A Steam Frame with Frametop installed (see the main README), on this fork's branch:
+- A Steam Frame with Frametop from this fork's branch. Install it the way the main README's
+  [Install on the headset](../README.md#install-on-the-headset) describes (Launch a program →
+  Desktop, then Konsole), but clone this branch instead of running get.sh:
   ```
-  cd ~/frametop
-  git remote add dkiiv https://github.com/dkiiv/frametop.git
-  git fetch dkiiv && git checkout -b remote-display dkiiv/remote-display-poc-handoff
-  ./install.sh
+  git clone -b remote-display-poc-handoff https://github.com/dkiiv/frametop.git ~/frametop
+  cd ~/frametop && ./install.sh
   ```
-  (It carries two small Frametop changes Remote PC relies on: `ft-float list apps` and the
-  grab-bar hit-box fix. Restart the Frametop desktop afterwards.)
+  The branch is Frametop plus Remote PC (and two small Frametop changes it relies on: `ft-float
+  list apps` and the grab-bar hit-box fix). Already have Frametop in `~/frametop`? Switch it:
+  `cd ~/frametop && git remote add dkiiv https://github.com/dkiiv/frametop.git && git fetch dkiiv
+  && git checkout -b remote-display dkiiv/remote-display-poc-handoff && ./install.sh`, then
+  restart the Frametop desktop.
 - A Windows 10/11 PC with a GPU that can encode HEVC (NVIDIA, AMD or Intel), on the same network
   as the Frame. Valve's USB Wi-Fi adapter for the PC gives the lowest latency (about 3 ms here),
   but home Wi-Fi works.
